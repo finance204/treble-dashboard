@@ -40,6 +40,12 @@ def get_logged_in_email():
     except Exception:
         return str(getattr(st.user, "email", "") or "").strip().lower()
 
+def is_user_logged_in():
+    try:
+        return bool(st.user)
+    except Exception:
+        return bool(get_logged_in_email())
+
 
 def require_treble_login():
     auth_enabled = is_enabled(
@@ -54,7 +60,7 @@ def require_treble_login():
         "treble.ai"
     ).strip().lower().lstrip("@")
 
-    if not st.user.is_logged_in:
+    if not is_user_logged_in():
         st.title("Treble Dashboard")
         st.caption("Sign in with your Treble Google account to continue.")
 
