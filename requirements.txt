@@ -1,0 +1,8 @@
+streamlit[auth]>=1.56
+pandas
+plotly
+stripe
+python-dotenv
+numpy
+gspread
+google-auth
