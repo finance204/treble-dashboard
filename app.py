@@ -36,6 +36,16 @@ def is_enabled(value):
 
 def get_logged_in_email():
     try:
+        user_info = st.user.to_dict()
+    except Exception:
+        user_info = {}
+
+    for key in ["email", "preferred_username", "upn"]:
+        value = user_info.get(key, "")
+        if value:
+            return str(value).strip().lower()
+
+    try:
         return str(st.user.get("email", "") or "").strip().lower()
     except Exception:
         return str(getattr(st.user, "email", "") or "").strip().lower()
