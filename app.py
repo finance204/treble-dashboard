@@ -34,14 +34,22 @@ def is_enabled(value):
     return str(value).strip().lower() in ["1", "true", "yes", "y", "on"]
 
 
-def get_logged_in_email():
+def get_user_info():
     try:
-        user_info = st.user.to_dict()
+        return dict(st.user.to_dict())
     except Exception:
-        user_info = {}
+        try:
+            return dict(st.user)
+        except Exception:
+            return {}
+
+
+def get_logged_in_email():
+    user_info = get_user_info()
 
     for key in ["email", "preferred_username", "upn"]:
         value = user_info.get(key, "")
+
         if value:
             return str(value).strip().lower()
 
@@ -50,11 +58,9 @@ def get_logged_in_email():
     except Exception:
         return str(getattr(st.user, "email", "") or "").strip().lower()
 
+
 def is_user_logged_in():
-    try:
-        return bool(st.user)
-    except Exception:
-        return bool(get_logged_in_email())
+    return bool(get_logged_in_email())
 
 
 def require_treble_login():
@@ -76,6 +82,19 @@ def require_treble_login():
 
         if st.button("Sign in with Google"):
             st.login()
+
+        try:
+            has_partial_session = bool(st.user)
+        except Exception:
+            has_partial_session = False
+
+        if has_partial_session:
+            st.caption(
+                "If you already signed in and still see this screen, reset the session and try again."
+            )
+
+            if st.button("Reset sign-in"):
+                st.logout()
 
         st.stop()
 
