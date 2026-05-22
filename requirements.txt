@@ -1,4 +1,5 @@
 streamlit[auth]>=1.56
+httpx
 pandas
 plotly
 stripe
