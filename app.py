@@ -63,14 +63,36 @@ def is_user_logged_in():
     return bool(get_logged_in_email())
 
 
-def require_treble_login():
-    auth_enabled = is_enabled(
-        get_secret_or_env("DASHBOARD_AUTH_ENABLED", "false")
-    )
+def require_password_login():
+    expected_password = get_secret_or_env("DASHBOARD_PASSWORD", "")
 
-    if not auth_enabled:
+    if not expected_password:
+        st.error("Dashboard password is not configured.")
+        st.stop()
+
+    if st.session_state.get("dashboard_password_ok"):
         return
 
+    st.title("Treble Dashboard")
+    st.caption("Enter the Treble dashboard password to continue.")
+
+    password = st.text_input(
+        "Password",
+        type="password",
+        label_visibility="collapsed"
+    )
+
+    if st.button("Enter"):
+        if password == expected_password:
+            st.session_state.dashboard_password_ok = True
+            st.rerun()
+
+        st.error("Incorrect password.")
+
+    st.stop()
+
+
+def require_google_login():
     allowed_domain = get_secret_or_env(
         "DASHBOARD_ALLOWED_EMAIL_DOMAIN",
         "treble.ai"
@@ -118,7 +140,26 @@ def require_treble_login():
             st.stop()
 
 
-require_treble_login()
+def require_dashboard_access():
+    auth_enabled = is_enabled(
+        get_secret_or_env("DASHBOARD_AUTH_ENABLED", "false")
+    )
+
+    if not auth_enabled:
+        return
+
+    auth_mode = get_secret_or_env(
+        "DASHBOARD_AUTH_MODE",
+        "password"
+    ).strip().lower()
+
+    if auth_mode == "google":
+        require_google_login()
+    else:
+        require_password_login()
+
+
+require_dashboard_access()
 
 try:
     stripe.api_key = st.secrets["STRIPE_SECRET_KEY"]
