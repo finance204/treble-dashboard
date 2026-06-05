@@ -82,6 +82,17 @@ def has_valid_embed_token():
     return str(provided_token) == str(expected_token)
 
 
+def has_public_section_view():
+    allowed_sections = [
+        "aging",
+        "invoice-volume",
+        "stripe-payments",
+        "brazil-finance"
+    ]
+
+    return get_query_param("section", "").strip().lower() in allowed_sections
+
+
 def require_password_login():
     expected_password = get_secret_or_env("DASHBOARD_PASSWORD", "")
 
@@ -167,7 +178,7 @@ def require_dashboard_access():
     if not auth_enabled:
         return
 
-    if has_valid_embed_token():
+    if has_valid_embed_token() or has_public_section_view():
         return
 
     auth_mode = get_secret_or_env(
