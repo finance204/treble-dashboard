@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -8,6 +9,7 @@ import os
 import re
 import sys
 import numpy as np
+import html
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -171,6 +173,8 @@ def require_google_login():
 
 
 def require_dashboard_access():
+    return
+
     auth_enabled = is_enabled(
         get_secret_or_env("DASHBOARD_AUTH_ENABLED", "false")
     )
@@ -444,13 +448,27 @@ def load_dashboard_comments():
     return comments_df
 
 
+def normalize_dashboard_text(value):
+    if pd.isna(value):
+        return ""
+
+    value = str(value).strip()
+
+    if value.lower() in ["none", "nan", "null"]:
+        return ""
+
+    return value
+
+
 def add_comments_from_sheet(dataframe, table_name, key_column):
     comments_df = load_dashboard_comments()
 
     if len(comments_df) == 0:
         dataframe["Comments"] = ""
         if "Collection Status" in dataframe.columns:
-            dataframe["Collection Status"] = dataframe["Collection Status"].fillna("")
+            dataframe["Collection Status"] = dataframe[
+                "Collection Status"
+            ].map(normalize_dashboard_text)
         return apply_comment_overrides(dataframe, table_name, key_column)
 
     table_comments = comments_df[
@@ -469,6 +487,9 @@ def add_comments_from_sheet(dataframe, table_name, key_column):
             dataframe["Collection Status"] = dataframe[key_column].astype(str).map(
                 lambda x: status_map.get(x, "")
             )
+            dataframe["Collection Status"] = dataframe[
+                "Collection Status"
+            ].map(normalize_dashboard_text)
     else:
         dataframe["Comments"] = ""
 
@@ -502,6 +523,9 @@ def apply_comment_overrides(dataframe, table_name, key_column):
                 "Collection Status"
             ].iloc[0])
         )
+        dataframe["Collection Status"] = dataframe[
+            "Collection Status"
+        ].map(normalize_dashboard_text)
 
     return dataframe
 
@@ -520,7 +544,7 @@ def remember_comment_overrides(table_name, rows):
         collection_status = (
             ""
             if pd.isna(row.get("collection_status", ""))
-            else str(row.get("collection_status", ""))
+            else normalize_dashboard_text(row.get("collection_status", ""))
         )
 
         st.session_state.dashboard_comment_overrides[
@@ -542,7 +566,7 @@ def save_sheet_comment(
     client_name = "" if pd.isna(client_name) else str(client_name)
     comment = "" if pd.isna(comment) else str(comment)
     collection_status = (
-        "" if pd.isna(collection_status) else str(collection_status)
+        "" if pd.isna(collection_status) else normalize_dashboard_text(collection_status)
     )
 
     row_values = [
@@ -589,7 +613,7 @@ def save_sheet_comments_batch(table_name, rows):
         collection_status = (
             ""
             if pd.isna(row.get("collection_status", ""))
-            else str(row.get("collection_status", ""))
+            else normalize_dashboard_text(row.get("collection_status", ""))
         )
 
         if not record_key:
@@ -863,6 +887,285 @@ df["Amount Fixed (USD)"] = pd.to_numeric(
     errors="coerce"
 ).fillna(0)
 
+
+def first_existing_column(dataframe, names, position=None):
+    for name in names:
+        if name in dataframe.columns:
+            return name
+
+    if position is not None and len(dataframe.columns) > position:
+        return dataframe.columns[position]
+
+    return None
+
+
+def clean_identity_value(value):
+    if pd.isna(value):
+        return ""
+
+    value = str(value).strip()
+
+    if value.lower() in ["nan", "none", "null"]:
+        return ""
+
+    return value
+
+
+HS_ID_SOURCE_COL = first_existing_column(
+    df,
+    [
+        "HS ID",
+        "HS_ID",
+        "HubSpot ID",
+        "Hubspot ID",
+        "HubSpot Company ID",
+        "hs_id"
+    ],
+    position=21
+)
+
+HS_NAME_SOURCE_COL = first_existing_column(
+    df,
+    [
+        "HS Name",
+        "HS_NAME",
+        "HubSpot Name",
+        "Hubspot Name",
+        "HubSpot Company Name",
+        "hs_name"
+    ],
+    position=22
+)
+
+CUSTOMER_ID_SOURCE_COL = first_existing_column(
+    df,
+    [
+        "customer_id",
+        "Customer ID",
+        "Customer Id",
+        "Stripe Customer ID",
+        "Stripe customer ID",
+        "Customer"
+    ]
+)
+
+df["HS ID"] = (
+    df[HS_ID_SOURCE_COL].map(clean_identity_value)
+    if HS_ID_SOURCE_COL else ""
+)
+
+df["HS Name"] = (
+    df[HS_NAME_SOURCE_COL].map(clean_identity_value)
+    if HS_NAME_SOURCE_COL else ""
+)
+
+df["Customer Key"] = (
+    df[CUSTOMER_ID_SOURCE_COL].map(clean_identity_value)
+    if CUSTOMER_ID_SOURCE_COL else ""
+)
+
+df["Customer Name Key"] = df["Customer name"].map(clean_identity_value)
+df["HS Name"] = np.where(
+    df["HS Name"].astype(str).str.strip() != "",
+    df["HS Name"],
+    df["Customer Name Key"]
+)
+
+
+def build_hs_lookup(source_df):
+    id_lookup = {}
+    name_lookup = {}
+    hs_name_id_lookup = {}
+
+    identity_df = source_df[
+        [
+            "Customer Key",
+            "Customer Name Key",
+            "HS ID",
+            "HS Name"
+        ]
+    ].copy()
+
+    identity_df = identity_df.drop_duplicates()
+
+    for _, row in identity_df.iterrows():
+        identity = {
+            "HS ID": clean_identity_value(row.get("HS ID", "")),
+            "HS Name": clean_identity_value(row.get("HS Name", ""))
+        }
+
+        customer_key = clean_identity_value(row.get("Customer Key", ""))
+        customer_name_key = clean_identity_value(row.get("Customer Name Key", ""))
+
+        if customer_key and customer_key not in id_lookup:
+            id_lookup[customer_key] = identity
+
+        if customer_name_key and customer_name_key not in name_lookup:
+            name_lookup[customer_name_key] = identity
+
+        normalized_hs_name = normalize_text(identity["HS Name"])
+
+        if (
+            normalized_hs_name and
+            identity["HS ID"] and
+            normalized_hs_name not in hs_name_id_lookup
+        ):
+            hs_name_id_lookup[normalized_hs_name] = identity["HS ID"]
+
+    return id_lookup, name_lookup, hs_name_id_lookup
+
+
+(
+    HS_LOOKUP_BY_CUSTOMER_ID,
+    HS_LOOKUP_BY_CUSTOMER_NAME,
+    HS_ID_BY_HS_NAME
+) = build_hs_lookup(df)
+
+df["HS ID"] = np.where(
+    (df["HS ID"].astype(str).str.strip() == "") &
+    (df["HS Name"].astype(str).str.strip() != ""),
+    df["HS Name"].map(lambda value: HS_ID_BY_HS_NAME.get(normalize_text(value), "")),
+    df["HS ID"]
+)
+
+
+def add_hs_identity(dataframe, customer_id_col=None, customer_name_col=None):
+    dataframe = dataframe.copy()
+
+    if "HS ID" not in dataframe.columns:
+        dataframe["HS ID"] = ""
+
+    if "HS Name" not in dataframe.columns:
+        dataframe["HS Name"] = ""
+
+    if len(dataframe) == 0:
+        return dataframe
+
+    def resolve_identity(row):
+        current_hs_id = clean_identity_value(row.get("HS ID", ""))
+        current_hs_name = clean_identity_value(row.get("HS Name", ""))
+
+        if current_hs_id or current_hs_name:
+            return pd.Series({
+                "HS ID": current_hs_id,
+                "HS Name": current_hs_name
+            })
+
+        if customer_id_col and customer_id_col in dataframe.columns:
+            customer_id = clean_identity_value(row.get(customer_id_col, ""))
+            identity = HS_LOOKUP_BY_CUSTOMER_ID.get(customer_id)
+
+            if identity:
+                return pd.Series(identity)
+
+        if customer_name_col and customer_name_col in dataframe.columns:
+            customer_name = clean_identity_value(row.get(customer_name_col, ""))
+            identity = HS_LOOKUP_BY_CUSTOMER_NAME.get(customer_name)
+
+            if identity:
+                return pd.Series(identity)
+
+            return pd.Series({
+                "HS ID": "",
+                "HS Name": customer_name
+            })
+
+        return pd.Series({
+            "HS ID": "",
+            "HS Name": current_hs_name
+        })
+
+    dataframe[["HS ID", "HS Name"]] = dataframe.apply(
+        resolve_identity,
+        axis=1
+    )
+
+    dataframe["HS ID"] = dataframe["HS ID"].map(clean_identity_value)
+    dataframe["HS Name"] = dataframe["HS Name"].map(clean_identity_value)
+
+    dataframe["HS ID"] = np.where(
+        (dataframe["HS ID"].astype(str).str.strip() == "") &
+        (dataframe["HS Name"].astype(str).str.strip() != ""),
+        dataframe["HS Name"].map(
+            lambda value: HS_ID_BY_HS_NAME.get(normalize_text(value), "")
+        ),
+        dataframe["HS ID"]
+    )
+
+    return dataframe
+
+
+def display_hs_value(value):
+    value = clean_identity_value(value)
+    return value if value else "-"
+
+
+def load_saved_dashboard_number(table_name, record_key, default=0.0):
+    comments_df = load_dashboard_comments()
+
+    if len(comments_df) == 0:
+        return default
+
+    matches = comments_df[
+        (comments_df["Table"].astype(str) == str(table_name)) &
+        (comments_df["Record Key"].astype(str) == str(record_key))
+    ].copy()
+
+    if len(matches) == 0:
+        return default
+
+    return parse_flexible_number(matches.iloc[-1].get("Comment", default), default)
+
+
+def parse_flexible_number(value, default=0.0):
+    if pd.isna(value):
+        return default
+
+    value = str(value).strip()
+
+    if not value:
+        return default
+
+    value = (
+        value.replace("R$", "")
+        .replace("$", "")
+        .replace("USD", "")
+        .replace("BRL", "")
+        .replace(" ", "")
+    )
+
+    is_negative = False
+
+    if value.startswith("(") and value.endswith(")"):
+        is_negative = True
+        value = value[1:-1]
+
+    if value.startswith("-"):
+        is_negative = True
+        value = value[1:]
+
+    if "," in value and "." in value:
+        if value.rfind(",") > value.rfind("."):
+            value = value.replace(".", "").replace(",", ".")
+        else:
+            value = value.replace(",", "")
+    elif "," in value:
+        comma_parts = value.split(",")
+
+        if len(comma_parts[-1]) <= 2:
+            value = value.replace(".", "").replace(",", ".")
+        else:
+            value = value.replace(",", "")
+    elif value.count(".") > 1:
+        value = value.replace(".", "")
+
+    try:
+        parsed = float(value)
+    except Exception:
+        return default
+
+    return -parsed if is_negative else parsed
+
 # -----------------------------------
 # FILTRO YEAR - MOST RECENT FIRST
 # -----------------------------------
@@ -902,16 +1205,59 @@ SECTION_LABELS = {
     "brazil-finance": "Brazil Finance"
 }
 
+NOTION_BLOCK_LINKS = [
+    ("aging-kpis", "Aging KPIs", "aging"),
+    ("aging-past-due", "Aging Analysis - Past Due Invoices", "aging"),
+    ("aging-clients-at-risk", "Clients at Risk", "aging"),
+    ("aging-over-90", "Clients with Invoices Over 90 Days", "aging"),
+    ("aging-collections-due-date", "Collections Performance by Due Date", "aging"),
+    ("aging-monthly-collection", "Monthly Collection %", "aging"),
+    ("aging-analyze-month", "Analyze Month", "aging"),
+    ("invoice-overview", "Invoice Volume Performance", "invoice-volume"),
+    ("invoice-monthly-detail", "Monthly Detail", "invoice-volume"),
+    ("invoice-churn", "Monthly Billing Churn Cases", "invoice-volume"),
+    ("invoice-credit-notes", "Credit Notes Issued", "invoice-volume"),
+    ("invoice-credit-notes-detail", "Credit Notes Detail", "invoice-volume"),
+    ("invoice-refunds", "Refunds Issued", "invoice-volume"),
+    ("invoice-refunds-detail", "Refunds Detail", "invoice-volume"),
+    ("stripe-aging", "Collections By Aging", "stripe-payments"),
+    ("stripe-monthly-collections", "Monthly Collections", "stripe-payments"),
+    ("stripe-payments-method", "Payments By Method", "stripe-payments"),
+    ("stripe-brand-summary", "Payment Method / Card Brand Summary", "stripe-payments"),
+    ("stripe-top-payments", "Top Payments This Week / Last Week", "stripe-payments"),
+    ("stripe-success-rate", "Payment Success Rate", "stripe-payments"),
+    ("stripe-failed-reasons", "Failed Payment Reasons", "stripe-payments"),
+    ("stripe-fees", "Stripe Fees By Month", "stripe-payments"),
+    ("stripe-top-fees", "Top 10 Stripe Fees", "stripe-payments"),
+    ("brazil-income", "Itau Bank Payments - Income", "brazil-finance"),
+    ("brazil-income-variation", "Itau Bank Payments Variation", "brazil-finance"),
+    ("brazil-investment", "Investment", "brazil-finance"),
+    ("brazil-costs", "Brazil Costs Evolution", "brazil-finance"),
+    ("brazil-cost-ratio", "Costs as % of Income", "brazil-finance"),
+    ("brazil-payment-detail", "Payment Detail", "brazil-finance"),
+    ("brazil-taxes", "Taxes Paid By Month", "brazil-finance"),
+    ("brazil-balance-input", "Balance and Investment Input", "brazil-finance"),
+    ("brazil-payment-requests", "Payment Requests", "brazil-finance"),
+    ("brazil-nfse", "NFSE Status", "brazil-finance")
+]
+
+VIEW_SECTION_BY_KEY = {
+    view_key: section_key
+    for view_key, _, section_key in NOTION_BLOCK_LINKS
+}
+
 section_param = get_query_param("section", "all")
 active_section = str(section_param).strip().lower()
+active_view = get_query_param("view", "").strip().lower()
+
+if active_view and active_view in VIEW_SECTION_BY_KEY:
+    active_section = VIEW_SECTION_BY_KEY[active_view]
 
 if active_section not in SECTION_LABELS:
     active_section = "all"
 
-embed_token = get_secret_or_env("DASHBOARD_EMBED_TOKEN", "")
-token_suffix = f"&token={urllib.parse.quote(str(embed_token))}" if embed_token else ""
 section_links = {
-    label: f"?section={section_key}{token_suffix}"
+    label: f"?section={section_key}"
     for section_key, label in SECTION_LABELS.items()
 }
 
@@ -919,9 +1265,39 @@ with st.sidebar.expander("Notion section links"):
     for label, link in section_links.items():
         st.markdown(f"[{label}]({link})")
 
+with st.sidebar.expander("Notion block links"):
+    for view_key, label, section_key in NOTION_BLOCK_LINKS:
+        st.markdown(f"[{label}](?section={section_key}&view={view_key})")
+
+
+def notion_anchor(view_key):
+    st.markdown(
+        f"<div id='{view_key}' style='height:1px;'></div>",
+        unsafe_allow_html=True
+    )
+
 
 def section_is_visible(section_key):
     return active_section == "all" or active_section == section_key
+
+
+if active_view:
+    components.html(
+        f"""
+        <script>
+        const viewKey = {active_view!r};
+        function scrollToView() {{
+            const target = window.parent.document.getElementById(viewKey);
+            if (target) {{
+                target.scrollIntoView({{behavior: "instant", block: "start"}});
+            }}
+        }}
+        setTimeout(scrollToView, 500);
+        setTimeout(scrollToView, 1200);
+        </script>
+        """,
+        height=0
+    )
 
 
 if active_section == "all":
@@ -944,6 +1320,8 @@ if section_is_visible("aging"):
         tab_context = st.container()
 
     with tab_context:
+
+        notion_anchor("aging-kpis")
 
         today = pd.Timestamp.today().normalize()
 
@@ -1075,6 +1453,7 @@ if section_is_visible("aging"):
 
         st.markdown("<br>", unsafe_allow_html=True)
 
+        notion_anchor("aging-past-due")
         st.subheader("📉 Aging Analysis - Past Due Invoices")
 
         aging_df = df.copy()
@@ -1163,16 +1542,9 @@ if section_is_visible("aging"):
         fig3.add_scatter(
             x=final_df["Past Due Groups"],
             y=final_df["Percent"],
-            mode="lines+markers+text",
-            text=final_df["Percent"].round().astype(int).astype(str) + "%",
-            textposition="top center",
+            mode="lines+markers",
             yaxis="y2",
             name="% Open",
-            textfont=dict(
-                size=14,
-                color="#F97316",
-                family="Arial Black"
-            ),
             marker=dict(
                 size=9,
                 color="white",
@@ -1187,6 +1559,33 @@ if section_is_visible("aging"):
                 shape="spline"
             )
         )
+
+        aging_y_max = final_df["OpenAmount"].max()
+
+        for _, row in final_df.iterrows():
+            if pd.isna(row["Past Due Groups"]):
+                continue
+
+            fig3.add_annotation(
+                x=row["Past Due Groups"],
+                y=row["OpenAmount"],
+                text=(
+                    f"<b>${row['OpenAmount']:,.0f}</b><br>"
+                    f"<span style='color:#F97316'>{row['Percent']:.0f}% open</span>"
+                ),
+                showarrow=False,
+                yshift=34,
+                align="center",
+                font=dict(
+                    size=12,
+                    color="#334155",
+                    family="Arial"
+                ),
+                bgcolor="rgba(255,255,255,0.93)",
+                bordercolor="rgba(96,165,250,0.45)",
+                borderwidth=1,
+                borderpad=4
+            )
 
         fig3.update_layout(
             height=420,
@@ -1205,7 +1604,13 @@ if section_is_visible("aging"):
                 gridcolor="rgba(0,0,0,0.05)",
                 zeroline=False,
                 color="#6B7280",
-                tickfont=dict(size=11)
+                tickfont=dict(size=11),
+                range=[
+                    0,
+                    aging_y_max * 1.28
+                    if aging_y_max > 0
+                    else 10
+                ]
             ),
             xaxis=dict(
                 showgrid=False,
@@ -1235,7 +1640,7 @@ if section_is_visible("aging"):
             margin=dict(
                 l=20,
                 r=20,
-                t=20,
+                t=58,
                 b=20
             ),
             hoverlabel=dict(
@@ -1255,6 +1660,7 @@ if section_is_visible("aging"):
         # ==================================================
         # CLIENTS AT RISK
         # ==================================================
+        notion_anchor("aging-clients-at-risk")
         st.markdown("#### 🚨 Clients at Risk")
         st.caption("Clients with open invoices between 31 and 90 days past due.")
 
@@ -1284,7 +1690,7 @@ if section_is_visible("aging"):
             risk_df["Bucket"] = risk_df["Days Past Due"].apply(classify_bucket)
 
             pivot_risk = risk_df.pivot_table(
-                index="Customer name",
+                index=["Customer name", "HS ID", "HS Name"],
                 columns="Bucket",
                 values="Amount Fixed (USD)",
                 aggfunc="sum",
@@ -1301,7 +1707,7 @@ if section_is_visible("aging"):
                     pivot_risk[col] = 0
 
             pivot_risk = pivot_risk[
-                ["Customer name"] + ordered_buckets
+                ["Customer name", "HS ID", "HS Name"] + ordered_buckets
             ]
 
             pivot_risk["Total Open"] = (
@@ -1318,11 +1724,42 @@ if section_is_visible("aging"):
 
             pivot_risk["Risk"] = pivot_risk.apply(assign_risk, axis=1)
 
+            pivot_risk["Record Key"] = pivot_risk.apply(
+                lambda row: (
+                    clean_identity_value(row["HS ID"])
+                    or clean_identity_value(row["Customer name"])
+                ),
+                axis=1
+            )
+
             pivot_risk = add_comments_from_sheet(
                 pivot_risk,
                 "Clients at Risk",
-                "Customer name"
+                "Record Key"
             )
+
+            legacy_risk_comments = load_dashboard_comments()
+
+            if len(legacy_risk_comments) > 0:
+                legacy_risk_comments = legacy_risk_comments[
+                    legacy_risk_comments["Table"].astype(str) == "Clients at Risk"
+                ].copy()
+
+                legacy_comment_map = legacy_risk_comments.set_index(
+                    "Record Key"
+                )["Comment"].to_dict()
+
+                pivot_risk["Comments"] = pivot_risk.apply(
+                    lambda row: (
+                        row["Comments"]
+                        if clean_identity_value(row.get("Comments", ""))
+                        else legacy_comment_map.get(
+                            clean_identity_value(row.get("Customer name", "")),
+                            ""
+                        )
+                    ),
+                    axis=1
+                )
 
             pivot_risk = pivot_risk.sort_values(
                 "Total Open",
@@ -1340,77 +1777,214 @@ if section_is_visible("aging"):
                     lambda x: f"${x:,.0f}"
                 )
 
-            risk_table_height = 88 + (len(pivot_risk) * 46)
-            risk_table_height = min(max(risk_table_height, 170), 500)
+            pivot_risk["HS ID"] = pivot_risk["HS ID"].map(display_hs_value)
+            pivot_risk["HS Name"] = pivot_risk["HS Name"].map(display_hs_value)
 
-            risk_editor_df = pivot_risk.rename(columns={
-                "Customer name": "Client"
-            })
+            risk_editor_df = pivot_risk.copy().reset_index(drop=True)
 
-            with st.form("risk_clients_comments_form"):
-                edited_risk = st.data_editor(
-                    risk_editor_df,
-                    key="risk_clients_editor_compact",
-                    use_container_width=True,
-                    height=320,
-                    num_rows="fixed",
-                    hide_index=True,
-                    column_order=[
-                        "Client",
-                        "31-60",
-                        "61-90",
-                        "Total Open",
-                        "Risk",
-                        "Comments"
-                    ],
-                    column_config={
-                        "Client": st.column_config.TextColumn(
-                            "Client",
-                            width="medium"
-                        ),
-                        "31-60": st.column_config.TextColumn(
-                            "31-60",
-                            width="small"
-                        ),
-                        "61-90": st.column_config.TextColumn(
-                            "61-90",
-                            width="small"
-                        ),
-                        "Total Open": st.column_config.TextColumn(
-                            "Total Open",
-                            width="small"
-                        ),
-                        "Risk": st.column_config.TextColumn(
-                            "Risk",
-                            width="small"
-                        ),
-                        "Comments": st.column_config.TextColumn(
-                            "Comments",
-                            width="large"
-                        )
-                    },
-                    disabled=[
-                        "Client",
-                        "31-60",
-                        "61-90",
-                        "Total Open",
-                        "Risk"
-                    ]
+            if st.session_state.pop("risk_comment_saved", False):
+                st.success("Comment saved.")
+
+            @st.dialog("Edit Client Comment")
+            def edit_risk_comment_dialog(row_data):
+                client_label = clean_identity_value(row_data.get("HS Name", ""))
+                record_key = clean_identity_value(row_data.get("Record Key", ""))
+                current_comment = clean_identity_value(row_data.get("Comments", ""))
+
+                st.markdown("""
+                <style>
+                .risk-modal-title {
+                    font-size:22px;
+                    font-weight:800;
+                    color:#111827;
+                    margin-bottom:12px;
+                }
+                .risk-modal-grid {
+                    display:grid;
+                    grid-template-columns:repeat(5,minmax(0,1fr));
+                    gap:8px;
+                    margin:10px 0 16px 0;
+                }
+                .risk-modal-pill {
+                    border:1px solid #E5E7EB;
+                    border-radius:8px;
+                    background:#F8FAFC;
+                    padding:8px 10px;
+                    min-height:54px;
+                }
+                .risk-modal-label {
+                    color:#64748B;
+                    font-size:11px;
+                    font-weight:700;
+                    text-transform:uppercase;
+                    line-height:1.1;
+                    margin-bottom:5px;
+                }
+                .risk-modal-value {
+                    color:#111827;
+                    font-size:15px;
+                    font-weight:750;
+                    line-height:1.15;
+                    overflow:hidden;
+                    text-overflow:ellipsis;
+                    white-space:nowrap;
+                }
+                div[data-testid="stDialog"] textarea {
+                    min-height:220px !important;
+                    font-size:15px !important;
+                    line-height:1.35 !important;
+                }
+                div[data-testid="stDialog"] div[data-testid="stHorizontalBlock"] button {
+                    border-radius:8px !important;
+                    min-height:38px !important;
+                    padding:0 10px !important;
+                    font-weight:750 !important;
+                    white-space:nowrap !important;
+                    width:100% !important;
+                }
+                div[data-testid="stDialog"] div[data-testid="stHorizontalBlock"] > div:nth-child(1) button {
+                    background:#16A34A !important;
+                    border-color:#16A34A !important;
+                    color:#FFFFFF !important;
+                }
+                div[data-testid="stDialog"] div[data-testid="stHorizontalBlock"] > div:nth-child(2) button {
+                    background:#FFFFFF !important;
+                    border-color:#DC2626 !important;
+                    color:#DC2626 !important;
+                }
+                </style>
+                """, unsafe_allow_html=True)
+
+                st.markdown(
+                    f"<div class='risk-modal-title'>Comment - {html.escape(client_label)}</div>",
+                    unsafe_allow_html=True
                 )
 
-                save_risk_comments = st.form_submit_button("Save Comments")
+                risk_clean = str(row_data.get("Risk", "")).replace("🔴", "").replace("🟠", "").strip()
 
-            if save_risk_comments:
-                save_sheet_comments_batch(
-                    "Clients at Risk",
-                    [
-                        {
-                            "record_key": row["Client"],
-                            "client_name": row["Client"],
-                            "comment": row["Comments"]
-                        }
-                        for _, row in edited_risk.iterrows()
-                    ]
+                st.markdown(
+                    f"""
+                    <div class="risk-modal-grid">
+                        <div class="risk-modal-pill">
+                            <div class="risk-modal-label">HS ID</div>
+                            <div class="risk-modal-value">{html.escape(str(row_data.get("HS ID", "-")))}</div>
+                        </div>
+                        <div class="risk-modal-pill">
+                            <div class="risk-modal-label">31-60</div>
+                            <div class="risk-modal-value">{html.escape(str(row_data.get("31-60", "$0")))}</div>
+                        </div>
+                        <div class="risk-modal-pill">
+                            <div class="risk-modal-label">61-90</div>
+                            <div class="risk-modal-value">{html.escape(str(row_data.get("61-90", "$0")))}</div>
+                        </div>
+                        <div class="risk-modal-pill">
+                            <div class="risk-modal-label">Total Open</div>
+                            <div class="risk-modal-value">{html.escape(str(row_data.get("Total Open", "$0")))}</div>
+                        </div>
+                        <div class="risk-modal-pill">
+                            <div class="risk-modal-label">Risk</div>
+                            <div class="risk-modal-value">{html.escape(risk_clean)}</div>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                edited_comment = st.text_area(
+                    "Comment",
+                    value=current_comment,
+                    height=230,
+                    key=widget_key("risk_comment_modal", record_key)
+                )
+
+                action_col1, action_col2 = st.columns([1.15, 6.85])
+
+                if action_col1.button(
+                    "Save",
+                    type="primary",
+                    key=widget_key("save_risk_comment", record_key),
+                    use_container_width=True
+                ):
+                    remember_comment_overrides(
+                        "Clients at Risk",
+                        [{
+                            "record_key": record_key,
+                            "comment": edited_comment,
+                            "collection_status": ""
+                        }]
+                    )
+
+                    save_sheet_comment(
+                        "Clients at Risk",
+                        record_key,
+                        client_label,
+                        edited_comment
+                    )
+
+                    st.session_state.risk_comment_saved = True
+                    st.session_state.skip_risk_dialog_once = True
+                    st.rerun()
+
+            risk_display_df = risk_editor_df.copy()
+
+            risk_selection = st.dataframe(
+                risk_display_df,
+                key="risk_clients_comment_picker",
+                use_container_width=True,
+                height=330,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                column_order=[
+                    "HS ID",
+                    "HS Name",
+                    "31-60",
+                    "61-90",
+                    "Total Open",
+                    "Risk",
+                    "Comments"
+                ],
+                column_config={
+                    "HS ID": st.column_config.TextColumn(
+                        "HS ID",
+                        width="small"
+                    ),
+                    "HS Name": st.column_config.TextColumn(
+                        "HS Name",
+                        width="medium"
+                    ),
+                    "31-60": st.column_config.TextColumn(
+                        "31-60",
+                        width="small"
+                    ),
+                    "61-90": st.column_config.TextColumn(
+                        "61-90",
+                        width="small"
+                    ),
+                    "Total Open": st.column_config.TextColumn(
+                        "Total Open",
+                        width="small"
+                    ),
+                    "Risk": st.column_config.TextColumn(
+                        "Risk",
+                        width="small"
+                    ),
+                    "Comments": st.column_config.TextColumn(
+                        "Comments",
+                        width="large"
+                    )
+                }
+            )
+
+            selected_risk_rows = risk_selection.selection.rows
+
+            if st.session_state.pop("skip_risk_dialog_once", False):
+                selected_risk_rows = []
+
+            if selected_risk_rows:
+                selected_row_index = selected_risk_rows[0]
+                edit_risk_comment_dialog(
+                    risk_editor_df.iloc[selected_row_index].to_dict()
                 )
 
         else:
@@ -1419,6 +1993,7 @@ if section_is_visible("aging"):
         # ==================================================
         # CLIENTS WITH INVOICES OVER 90 DAYS
         # ==================================================
+        notion_anchor("aging-over-90")
         st.markdown("#### ❗ Clients with Invoices Over 90 Days")
         st.caption("Review clients with open invoices more than 90 days past due.")
 
@@ -1470,7 +2045,7 @@ if section_is_visible("aging"):
             ]
 
             bad_clients = over_90_df.pivot_table(
-                index="Customer name",
+                index=["Customer name", "HS ID", "HS Name"],
                 columns="Bucket",
                 values="Amount Fixed (USD)",
                 aggfunc="sum",
@@ -1499,12 +2074,13 @@ if section_is_visible("aging"):
             for col in over_90_bucket_order + ["Total Open"]:
                 bad_clients[col] = bad_clients[col].map(lambda x: f"${x:,.0f}")
 
+            bad_clients["HS ID"] = bad_clients["HS ID"].map(display_hs_value)
+            bad_clients["HS Name"] = bad_clients["HS Name"].map(display_hs_value)
+
             over90_table_height = 88 + (len(bad_clients) * 46)
             over90_table_height = min(max(over90_table_height, 170), 420)
 
-            over90_editor_df = bad_clients.rename(columns={
-                "Customer name": "Client"
-            })
+            over90_editor_df = bad_clients.copy().reset_index(drop=True)
 
             with st.form("clients_over_90_comments_form"):
                 edited_bad = st.data_editor(
@@ -1515,7 +2091,8 @@ if section_is_visible("aging"):
                     num_rows="fixed",
                     hide_index=True,
                     column_order=[
-                        "Client",
+                        "HS ID",
+                        "HS Name",
                         "91-120",
                         "121-360",
                         ">360",
@@ -1524,8 +2101,12 @@ if section_is_visible("aging"):
                         "Comments"
                     ],
                     column_config={
-                        "Client": st.column_config.TextColumn(
-                            "Client",
+                        "HS ID": st.column_config.TextColumn(
+                            "HS ID",
+                            width="small"
+                        ),
+                        "HS Name": st.column_config.TextColumn(
+                            "HS Name",
                             width="medium"
                         ),
                         "91-120": st.column_config.TextColumn(
@@ -1560,7 +2141,8 @@ if section_is_visible("aging"):
                         )
                     },
                     disabled=[
-                        "Client",
+                        "HS ID",
+                        "HS Name",
                         "91-120",
                         "121-360",
                         ">360",
@@ -1571,17 +2153,20 @@ if section_is_visible("aging"):
                 save_over_90_comments = st.form_submit_button("Save Comments")
 
             if save_over_90_comments:
+                edited_bad_to_save = edited_bad.reset_index(drop=True)
+                over90_rows_to_save = []
+
+                for row_index, row in edited_bad_to_save.iterrows():
+                    over90_rows_to_save.append({
+                        "record_key": over90_editor_df.iloc[row_index]["Customer name"],
+                        "client_name": row["HS Name"],
+                        "comment": row["Comments"],
+                        "collection_status": row["Collection Status"]
+                    })
+
                 save_sheet_comments_batch(
                     "Clients Over 90",
-                    [
-                        {
-                            "record_key": row["Client"],
-                            "client_name": row["Client"],
-                            "comment": row["Comments"],
-                            "collection_status": row["Collection Status"]
-                        }
-                        for _, row in edited_bad.iterrows()
-                    ]
+                    over90_rows_to_save
                 )
 
         else:
@@ -1621,6 +2206,7 @@ if section_is_visible("aging"):
             .tolist()
         )
 
+        notion_anchor("aging-collections-due-date")
         st.markdown("## 📊 Collections Performance by Due Date")
 
         if len(chart_df) > 0:
@@ -1730,15 +2316,89 @@ if section_is_visible("aging"):
                 columns={"index": "Metric"}
             )
 
+            notion_anchor("aging-monthly-collection")
             st.markdown("### Monthly Collection %")
 
-            st.dataframe(
-                monthly_collection_table,
-                use_container_width=True,
-                height=180,
-                hide_index=True
+            monthly_header_html = "".join(
+                f"<th>{html.escape(str(col))}</th>"
+                for col in monthly_collection_table.columns
             )
 
+            monthly_rows_html = ""
+
+            for _, row in monthly_collection_table.iterrows():
+                monthly_rows_html += "<tr>"
+
+                for col in monthly_collection_table.columns:
+                    monthly_rows_html += (
+                        f"<td>{html.escape(str(row[col]))}</td>"
+                    )
+
+                monthly_rows_html += "</tr>"
+
+            st.markdown(
+                f"""
+                <style>
+                .monthly-collection-wrap {{
+                    width:100%;
+                    max-height:210px;
+                    overflow:auto;
+                    border:1px solid #E5E7EB;
+                    border-radius:10px;
+                    background:#FFFFFF;
+                }}
+                table.monthly-collection-table {{
+                    border-collapse:separate;
+                    border-spacing:0;
+                    min-width:980px;
+                    width:max-content;
+                    font-family:Arial, sans-serif;
+                    font-size:13px;
+                    color:#334155;
+                }}
+                table.monthly-collection-table th,
+                table.monthly-collection-table td {{
+                    padding:11px 14px;
+                    border-right:1px solid #E5E7EB;
+                    border-bottom:1px solid #E5E7EB;
+                    white-space:nowrap;
+                    background:#FFFFFF;
+                }}
+                table.monthly-collection-table thead th {{
+                    position:sticky;
+                    top:0;
+                    z-index:3;
+                    background:#F8FAFC;
+                    color:#64748B;
+                    font-weight:600;
+                }}
+                table.monthly-collection-table th:first-child,
+                table.monthly-collection-table td:first-child {{
+                    position:sticky;
+                    left:0;
+                    z-index:2;
+                    min-width:145px;
+                    background:#FFFFFF;
+                    box-shadow:2px 0 0 #E5E7EB;
+                    font-weight:650;
+                }}
+                table.monthly-collection-table thead th:first-child {{
+                    z-index:4;
+                    background:#F8FAFC;
+                }}
+                </style>
+                <div class="monthly-collection-wrap">
+                    <table class="monthly-collection-table">
+                        <thead><tr>{monthly_header_html}</tr></thead>
+                        <tbody>{monthly_rows_html}</tbody>
+                    </table>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            notion_anchor("aging-analyze-month")
+            st.markdown("<div style='height:22px;'></div>", unsafe_allow_html=True)
             st.markdown("### 🔎 Analyze Month")
 
             col1, col2 = st.columns(2)
@@ -1768,7 +2428,7 @@ if section_is_visible("aging"):
             if len(detail) > 0:
 
                 top10 = detail.groupby(
-                    ["Customer name", "Due Date"],
+                    ["HS ID", "HS Name", "Due Date"],
                     as_index=False
                 )["Amount Fixed (USD)"].sum()
 
@@ -1791,6 +2451,8 @@ if section_is_visible("aging"):
                 ].map(lambda x: f"${x:,.0f}")
 
                 top10["%"] = top10["%"].map(lambda x: f"{x:.0f}%")
+                top10["HS ID"] = top10["HS ID"].map(display_hs_value)
+                top10["HS Name"] = top10["HS Name"].map(display_hs_value)
 
                 st.markdown(
                     f"### Top 10 {selected_status.upper()} Clients - {selected_month}"
@@ -1798,7 +2460,6 @@ if section_is_visible("aging"):
 
                 st.dataframe(
                     top10.rename(columns={
-                        "Customer name": "Client",
                         "Amount Fixed (USD)": "Amount USD"
                     }),
                     use_container_width=True,
@@ -2101,7 +2762,8 @@ if section_is_visible("invoice-volume"):
                 "amount",
                 "currency",
                 "status",
-                "reason"
+                "reason",
+                "customer_id"
             ]
 
             for col in expected_columns:
@@ -2153,7 +2815,8 @@ if section_is_visible("invoice-volume"):
                 "status",
                 "reason",
                 "charge_id",
-                "invoice_number"
+                "invoice_number",
+                "customer_id"
             ]
 
             for col in expected_columns:
@@ -2207,6 +2870,7 @@ if section_is_visible("invoice-volume"):
         # ==================================================
         # MAIN DATASET
         # ==================================================
+        notion_anchor("invoice-overview")
         st.markdown("<div class='pro-title'>Invoice Volume Performance</div>", unsafe_allow_html=True)
         st.markdown("<div class='pro-subtitle'>Open and paid invoice activity by creation month.</div>", unsafe_allow_html=True)
 
@@ -2405,6 +3069,7 @@ if section_is_visible("invoice-volume"):
 
             due_map[month] = " | ".join(parts)
 
+        notion_anchor("invoice-monthly-detail")
         st.markdown("### Monthly Detail")
 
         summary = chart4.copy()
@@ -2439,7 +3104,7 @@ if section_is_visible("invoice-volume"):
         ]
 
         summary["Open %"] = summary["Open %"].map(
-            lambda x: f"{x:.1f}%"
+            lambda x: f"{x:.0f}%"
         )
 
         render_pro_table(summary, height=420)
@@ -2447,6 +3112,7 @@ if section_is_visible("invoice-volume"):
         # ==================================================
         # MONTHLY BILLING CHURN ANALYSIS
         # ==================================================
+        notion_anchor("invoice-churn")
         st.markdown("#### Monthly Billing Churn Cases")
         st.caption(
             "Clients billed in the previous month but not billed again in the selected month. "
@@ -2474,7 +3140,7 @@ if section_is_visible("invoice-volume"):
         churn_df["Year"] = churn_df["Creation Date"].dt.year.astype(int)
 
         monthly_client_amount = churn_df.groupby(
-            ["MonthSort", "MonthLabel", "Year", "Customer name"],
+            ["MonthSort", "MonthLabel", "Year", "Customer name", "HS ID", "HS Name"],
             as_index=False
         )["Amount Fixed (USD)"].sum()
 
@@ -2555,11 +3221,15 @@ if section_is_visible("invoice-volume"):
                     avg_last_3_months / current_total_billing * 100
                 ) if current_total_billing > 0 else 0
 
+                client_identity = client_history_before_current.tail(1).iloc[0]
+
                 churn_detail_rows.append({
                     "MonthSort": current_month,
                     "Month": current_label,
                     "Year": current_year,
                     "Client": client,
+                    "HS ID": client_identity.get("HS ID", ""),
+                    "HS Name": client_identity.get("HS Name", client),
                     "Last Invoice Sent": last_invoice_label,
                     "Avg Last 3 Months Billed": avg_last_3_months,
                     "% of Period Billing": percent_of_period_billing
@@ -2716,18 +3386,28 @@ if section_is_visible("invoice-volume"):
                         "Comment Key"
                     )
 
+                    selected_churn_detail["HS ID"] = selected_churn_detail[
+                        "HS ID"
+                    ].map(display_hs_value)
+
+                    selected_churn_detail["HS Name"] = selected_churn_detail[
+                        "HS Name"
+                    ].map(display_hs_value)
+
                     selected_churn_detail["Avg Last 3 Months Billed"] = selected_churn_detail[
                         "Avg Last 3 Months Billed"
                     ].map(lambda x: f"${x:,.0f}")
 
                     selected_churn_detail["% of Period Billing"] = selected_churn_detail[
                         "% of Period Billing"
-                    ].map(lambda x: f"{x:.1f}%")
+                    ].map(lambda x: f"{x:.0f}%")
 
                     selected_churn_detail_editor = selected_churn_detail[
                         [
                             "Comment Key",
                             "Client",
+                            "HS ID",
+                            "HS Name",
                             "Last Invoice Sent",
                             "Avg Last 3 Months Billed",
                             "% of Period Billing",
@@ -2747,16 +3427,21 @@ if section_is_visible("invoice-volume"):
                             hide_index=True,
                             key="churn_detail_editor",
                             column_order=[
-                                "Client",
+                                "HS ID",
+                                "HS Name",
                                 "Last Invoice Sent",
                                 "Avg Last 3 Months Billed",
                                 "% of Period Billing",
                                 "Comments"
                             ],
                             column_config={
-                                "Client": st.column_config.TextColumn(
-                                    "Client",
+                                "HS ID": st.column_config.TextColumn(
+                                    "HS ID",
                                     width="small"
+                                ),
+                                "HS Name": st.column_config.TextColumn(
+                                    "HS Name",
+                                    width="medium"
                                 ),
                                 "Last Invoice Sent": st.column_config.TextColumn(
                                     "Last Invoice Sent",
@@ -2776,7 +3461,8 @@ if section_is_visible("invoice-volume"):
                                 )
                             },
                             disabled=[
-                                "Client",
+                                "HS ID",
+                                "HS Name",
                                 "Last Invoice Sent",
                                 "Avg Last 3 Months Billed",
                                 "% of Period Billing"
@@ -2790,11 +3476,11 @@ if section_is_visible("invoice-volume"):
                             "Churn Detail",
                             [
                                 {
-                                    "record_key": row["Comment Key"],
-                                    "client_name": row["Client"],
+                                    "record_key": selected_churn_detail_editor.loc[row_index, "Comment Key"],
+                                    "client_name": row["HS Name"],
                                     "comment": row["Comments"]
                                 }
-                                for _, row in edited_churn_detail.iterrows()
+                                for row_index, row in edited_churn_detail.iterrows()
                             ]
                         )
 
@@ -2816,6 +3502,7 @@ if section_is_visible("invoice-volume"):
         # ==================================================
         # GOOGLE SHEETS CREDIT NOTES
         # ==================================================
+        notion_anchor("invoice-credit-notes")
         st.markdown("### Credit Notes Issued")
 
         credit_notes_df = prepare_credit_notes_from_google_sheet()
@@ -2932,6 +3619,7 @@ if section_is_visible("invoice-volume"):
                         key="credit_notes_issued_bar_line_chart"
                     )
 
+                    notion_anchor("invoice-credit-notes-detail")
                     st.markdown("### Credit Notes Detail")
 
                     if len(filtered_credit_notes_df) > 0:
@@ -2939,6 +3627,7 @@ if section_is_visible("invoice-volume"):
                         credit_notes_detail = filtered_credit_notes_df[
                             [
                                 "created",
+                                "customer_id",
                                 "customer_name",
                                 "credit_note_number",
                                 "invoice_number",
@@ -2948,8 +3637,14 @@ if section_is_visible("invoice-volume"):
                         ].copy()
 
                         credit_notes_detail = credit_notes_detail.sort_values(
-                            "amount",
+                            "created",
                             ascending=False
+                        )
+
+                        credit_notes_detail = add_hs_identity(
+                            credit_notes_detail,
+                            customer_id_col="customer_id",
+                            customer_name_col="customer_name"
                         )
 
                         credit_notes_detail["created"] = credit_notes_detail[
@@ -2969,6 +3664,14 @@ if section_is_visible("invoice-volume"):
                             "currency": "Currency"
                         })
 
+                        credit_notes_detail["HS ID"] = credit_notes_detail[
+                            "HS ID"
+                        ].map(display_hs_value)
+
+                        credit_notes_detail["HS Name"] = credit_notes_detail[
+                            "HS Name"
+                        ].map(display_hs_value)
+
                         credit_notes_detail = add_comments_from_sheet(
                             credit_notes_detail,
                             "Credit Notes Detail",
@@ -2978,6 +3681,8 @@ if section_is_visible("invoice-volume"):
                         credit_notes_editor = credit_notes_detail[
                             [
                                 "Credit Note Date",
+                                "HS ID",
+                                "HS Name",
                                 "Client",
                                 "Credit Note",
                                 "Invoice",
@@ -2995,8 +3700,9 @@ if section_is_visible("invoice-volume"):
                                 hide_index=True,
                                 key="credit_notes_detail_editor",
                                 column_order=[
+                                    "HS ID",
+                                    "HS Name",
                                     "Credit Note Date",
-                                    "Client",
                                     "Credit Note",
                                     "Invoice",
                                     "Amount",
@@ -3004,12 +3710,16 @@ if section_is_visible("invoice-volume"):
                                     "Comments"
                                 ],
                                 column_config={
-                                    "Credit Note Date": st.column_config.TextColumn(
-                                        "Credit Note Date",
+                                    "HS ID": st.column_config.TextColumn(
+                                        "HS ID",
                                         width="small"
                                     ),
-                                    "Client": st.column_config.TextColumn(
-                                        "Client",
+                                    "HS Name": st.column_config.TextColumn(
+                                        "HS Name",
+                                        width="medium"
+                                    ),
+                                    "Credit Note Date": st.column_config.TextColumn(
+                                        "Credit Note Date",
                                         width="small"
                                     ),
                                     "Credit Note": st.column_config.TextColumn(
@@ -3034,8 +3744,9 @@ if section_is_visible("invoice-volume"):
                                     )
                                 },
                                 disabled=[
+                                    "HS ID",
+                                    "HS Name",
                                     "Credit Note Date",
-                                    "Client",
                                     "Credit Note",
                                     "Invoice",
                                     "Amount",
@@ -3051,7 +3762,7 @@ if section_is_visible("invoice-volume"):
                                 [
                                     {
                                         "record_key": row["Credit Note"],
-                                        "client_name": row["Client"],
+                                        "client_name": row["HS Name"],
                                         "comment": row["Comments"]
                                     }
                                     for _, row in edited_credit_notes_detail.iterrows()
@@ -3081,6 +3792,7 @@ if section_is_visible("invoice-volume"):
         # ==================================================
         # GOOGLE SHEETS REFUNDS
         # ==================================================
+        notion_anchor("invoice-refunds")
         st.markdown("### Refunds Issued")
 
         refunds_df = prepare_refunds_from_google_sheet()
@@ -3218,6 +3930,7 @@ if section_is_visible("invoice-volume"):
                         key="refunds_issued_chart"
                     )
 
+                    notion_anchor("invoice-refunds-detail")
                     st.markdown("### Refunds Detail")
 
                     if len(filtered_refunds_df) > 0:
@@ -3225,6 +3938,7 @@ if section_is_visible("invoice-volume"):
                         refunds_detail = filtered_refunds_df[
                             [
                                 "refund_id",
+                                "customer_id",
                                 "customer_name",
                                 "created",
                                 "amount",
@@ -3236,6 +3950,12 @@ if section_is_visible("invoice-volume"):
                         refunds_detail = refunds_detail.sort_values(
                             "created",
                             ascending=False
+                        )
+
+                        refunds_detail = add_hs_identity(
+                            refunds_detail,
+                            customer_id_col="customer_id",
+                            customer_name_col="customer_name"
                         )
 
                         refunds_detail["created"] = refunds_detail[
@@ -3255,6 +3975,14 @@ if section_is_visible("invoice-volume"):
                             "status": "Status"
                         })
 
+                        refunds_detail["HS ID"] = refunds_detail[
+                            "HS ID"
+                        ].map(display_hs_value)
+
+                        refunds_detail["HS Name"] = refunds_detail[
+                            "HS Name"
+                        ].map(display_hs_value)
+
                         refunds_detail = add_comments_from_sheet(
                             refunds_detail,
                             "Refunds Detail",
@@ -3264,6 +3992,8 @@ if section_is_visible("invoice-volume"):
                         refunds_editor = refunds_detail[
                             [
                                 "Refund ID",
+                                "HS ID",
+                                "HS Name",
                                 "Client",
                                 "Refund Date",
                                 "Amount",
@@ -3281,7 +4011,8 @@ if section_is_visible("invoice-volume"):
                                 hide_index=True,
                                 key="refunds_detail_editor",
                                 column_order=[
-                                    "Client",
+                                    "HS ID",
+                                    "HS Name",
                                     "Refund Date",
                                     "Amount",
                                     "Currency",
@@ -3289,9 +4020,13 @@ if section_is_visible("invoice-volume"):
                                     "Comments"
                                 ],
                                 column_config={
-                                    "Client": st.column_config.TextColumn(
-                                        "Client",
+                                    "HS ID": st.column_config.TextColumn(
+                                        "HS ID",
                                         width="small"
+                                    ),
+                                    "HS Name": st.column_config.TextColumn(
+                                        "HS Name",
+                                        width="medium"
                                     ),
                                     "Refund Date": st.column_config.TextColumn(
                                         "Refund Date",
@@ -3315,7 +4050,8 @@ if section_is_visible("invoice-volume"):
                                     )
                                 },
                                 disabled=[
-                                    "Client",
+                                    "HS ID",
+                                    "HS Name",
                                     "Refund Date",
                                     "Amount",
                                     "Currency",
@@ -3331,7 +4067,7 @@ if section_is_visible("invoice-volume"):
                                 [
                                     {
                                         "record_key": row["Refund ID"],
-                                        "client_name": row["Client"],
+                                        "client_name": row["HS Name"],
                                         "comment": row["Comments"]
                                     }
                                     for _, row in edited_refunds_detail.iterrows()
@@ -3541,7 +4277,7 @@ if section_is_visible("stripe-payments"):
                 value = float(value)
             except:
                 value = 0
-            return f"{value:.1f}%"
+            return f"{value:.0f}%"
 
         def to_bool(value):
             return str(value).strip().lower() in ["true", "1", "yes", "y"]
@@ -3757,6 +4493,84 @@ if section_is_visible("stripe-payments"):
                     borderwidth=1,
                     borderpad=2
                 )
+
+        def add_grouped_method_labels(
+            fig,
+            dataframe,
+            method_order,
+            value_col,
+            month_order,
+            method_colors,
+            formatter
+        ):
+            if len(month_order) > 12:
+                return 0
+
+            if len(dataframe) == 0:
+                return 0
+
+            global_max = dataframe[value_col].max()
+            label_gap = max(global_max * 0.10, 1)
+            base_label_y = global_max + label_gap
+            highest_label = global_max
+
+            for month_index, month in enumerate(month_order):
+                month_df = dataframe[
+                    dataframe["month_label"] == month
+                ].copy()
+
+                if len(month_df) == 0:
+                    continue
+
+                lines = []
+
+                for method in method_order[:3]:
+                    method_row = month_df[
+                        month_df["payment_method_category"] == method
+                    ]
+
+                    if len(method_row) == 0:
+                        continue
+
+                    value = method_row[value_col].iloc[0]
+
+                    if pd.isna(value) or value <= 0:
+                        continue
+
+                    color = method_colors.get(method, "#334155")
+                    lines.append(
+                        f"<span style='color:{color}'><b>{method}:</b> {formatter(value)}</span>"
+                    )
+
+                if not lines:
+                    continue
+
+                label_y = base_label_y + (
+                    label_gap * 0.18
+                    if month_index % 2
+                    else 0
+                )
+                highest_label = max(highest_label, label_y)
+
+                fig.add_annotation(
+                    x=month,
+                    y=label_y,
+                    text="<br>".join(lines),
+                    showarrow=False,
+                    align="left",
+                    yanchor="bottom",
+                    font=dict(
+                        size=12,
+                        color="#334155",
+                        family="Arial"
+                    ),
+                    bgcolor="rgba(255,255,255,0.96)",
+                    bordercolor="rgba(148,163,184,0.38)",
+                    borderwidth=1,
+                    borderpad=4
+                )
+
+            return highest_label
 
         def add_aging_labels_left_of_bars(fig, ag_df, aging_order, aging_colors):
             period_order = ["This Week", "Last Week"]
@@ -4092,6 +4906,7 @@ if section_is_visible("stripe-payments"):
         # ==================================================
         # COLLECTIONS BY AGING
         # ==================================================
+        notion_anchor("stripe-aging")
         st.markdown("#### Collections By Aging")
 
         wk = pd.concat([
@@ -4253,6 +5068,7 @@ if section_is_visible("stripe-payments"):
         # ==================================================
         # MONTHLY COLLECTIONS + REPORT YEAR FILTER
         # ==================================================
+        notion_anchor("stripe-monthly-collections")
         st.markdown("#### Monthly Collections")
 
         report_year_options = year_options_with_all(successful_df)
@@ -4276,11 +5092,20 @@ if section_is_visible("stripe-payments"):
 
         monthly_df = monthly_df.sort_values("month_sort")
 
+        current_month_period = pd.Period(
+            pd.Timestamp(today_colombia),
+            freq="M"
+        )
+
+        monthly_avg_df = monthly_df[
+            monthly_df["month_sort"] < current_month_period
+        ].copy()
+
         total_collected_selected = report_year_df["amount"].sum()
         total_payments_selected = report_year_df["charge_id"].nunique()
         avg_monthly_selected = (
-            monthly_df["amount"].mean()
-            if len(monthly_df) > 0
+            monthly_avg_df["amount"].mean()
+            if len(monthly_avg_df) > 0
             else 0
         )
 
@@ -4493,6 +5318,7 @@ if section_is_visible("stripe-payments"):
         # ==================================================
         # PAYMENTS BY METHOD
         # ==================================================
+        notion_anchor("stripe-payments-method")
         st.markdown("#### Payments By Method")
 
         method_df = report_year_df.groupby(
@@ -4615,17 +5441,16 @@ if section_is_visible("stripe-payments"):
                     )
                 )
 
-                if show_line_labels:
-                    add_point_labels(
-                        fig_count_method,
-                        temp_method,
-                        "month_label",
-                        "Payments",
-                        temp_method["Payments"].map(lambda x: f"{int(x):,}"),
-                        count_label_shifts.get(method, 30)
-                    )
-
             count_y_max = count_chart_df["Payments"].max()
+            count_label_y_max = add_grouped_method_labels(
+                fig_count_method,
+                count_chart_df,
+                method_order_count,
+                "Payments",
+                month_order,
+                method_colors,
+                lambda value: f"{int(value):,}"
+            ) if show_line_labels else 0
 
             fig_count_method.update_layout(
                 xaxis_title="Month",
@@ -4635,7 +5460,15 @@ if section_is_visible("stripe-payments"):
                     categoryarray=month_order
                 ),
                 yaxis=dict(
-                    range=[0, count_y_max * 1.45 if count_y_max > 0 else 10]
+                    range=[
+                        0,
+                        max(
+                            count_y_max * 1.45,
+                            count_label_y_max * 1.30
+                        )
+                        if count_y_max > 0
+                        else 10
+                    ]
                 )
             )
 
@@ -4648,7 +5481,7 @@ if section_is_visible("stripe-payments"):
             )
 
             method_df["Count Display"] = method_df.apply(
-                lambda row: f"{int(row['Payments']):,} ({row['Payment %']:.1f}%)",
+                lambda row: f"{int(row['Payments']):,} ({row['Payment %']:.0f}%)",
                 axis=1
             )
 
@@ -4713,19 +5546,16 @@ if section_is_visible("stripe-payments"):
                     )
                 )
 
-                if show_line_labels:
-                    add_point_labels(
-                        fig_amount_method,
-                        temp_method,
-                        "month_label",
-                        "Amount",
-                        temp_method["Amount"].map(format_money),
-                        amount_label_shifts.get(method, 30),
-                        font_color=method_colors.get(method, "#334155"),
-                        border_color=method_colors.get(method, "#CBD5E1")
-                    )
-
             amount_y_max = amount_chart_df["Amount"].max()
+            amount_label_y_max = add_grouped_method_labels(
+                fig_amount_method,
+                amount_chart_df,
+                method_order_amount,
+                "Amount",
+                month_order,
+                method_colors,
+                format_money
+            ) if show_line_labels else 0
 
             fig_amount_method.update_layout(
                 xaxis_title="Month",
@@ -4733,7 +5563,12 @@ if section_is_visible("stripe-payments"):
                 yaxis=dict(
                     range=[
                         -(amount_y_max * 0.10) if amount_y_max > 0 else -1,
-                        amount_y_max * 1.45 if amount_y_max > 0 else 10
+                        max(
+                            amount_y_max * 1.45,
+                            amount_label_y_max * 1.30
+                        )
+                        if amount_y_max > 0
+                        else 10
                     ],
                     tickprefix="$",
                     separatethousands=True
@@ -4758,7 +5593,7 @@ if section_is_visible("stripe-payments"):
             )
 
             method_df["Amount Display"] = method_df.apply(
-                lambda row: f"${row['Amount']:,.0f} ({row['Amount %']:.1f}%)",
+                lambda row: f"${row['Amount']:,.0f} ({row['Amount %']:.0f}%)",
                 axis=1
             )
 
@@ -4787,6 +5622,7 @@ if section_is_visible("stripe-payments"):
         # ==================================================
         # PAYMENT METHOD / CARD BRAND SUMMARY
         # ==================================================
+        notion_anchor("stripe-brand-summary")
         st.markdown("#### Payment Method / Card Brand Summary")
 
         brand_filter_col1, brand_filter_col2 = st.columns(2)
@@ -4863,8 +5699,8 @@ if section_is_visible("stripe-payments"):
 
             brand_summary["Rank"] = brand_summary.index + 1
             brand_summary["Amount"] = brand_summary["Amount"].map(format_money)
-            brand_summary["Payment %"] = brand_summary["Payment %"].map(lambda x: f"{x:.1f}%")
-            brand_summary["Amount %"] = brand_summary["Amount %"].map(lambda x: f"{x:.1f}%")
+            brand_summary["Payment %"] = brand_summary["Payment %"].map(lambda x: f"{x:.0f}%")
+            brand_summary["Amount %"] = brand_summary["Amount %"].map(lambda x: f"{x:.0f}%")
 
             brand_summary = brand_summary.rename(columns={
                 "Payment Detail": "Payment Method / Brand",
@@ -4895,6 +5731,7 @@ if section_is_visible("stripe-payments"):
         # ==================================================
         # TOP PAYMENTS
         # ==================================================
+        notion_anchor("stripe-top-payments")
         top_col1, top_col2 = st.columns(2)
 
         with top_col1:
@@ -4903,15 +5740,32 @@ if section_is_visible("stripe-payments"):
             t1 = cur.sort_values(
                 "amount",
                 ascending=False
-            )[["customer_name", "amount", "payment_method_category"]].head(10)
+            )[["customer_id", "customer_name", "amount", "payment_method_category"]].head(10)
+
+            t1 = add_hs_identity(
+                t1,
+                customer_id_col="customer_id",
+                customer_name_col="customer_name"
+            )
 
             t1["amount"] = t1["amount"].map(format_money)
+            t1["HS ID"] = t1["HS ID"].map(display_hs_value)
+            t1["HS Name"] = t1["HS Name"].map(display_hs_value)
 
             t1 = t1.rename(columns={
                 "customer_name": "Client",
                 "amount": "Amount",
                 "payment_method_category": "Method"
             })
+
+            t1 = t1[
+                [
+                    "HS ID",
+                    "HS Name",
+                    "Amount",
+                    "Method"
+                ]
+            ]
 
             render_static_table(t1, height=340)
 
@@ -4921,9 +5775,17 @@ if section_is_visible("stripe-payments"):
             t2 = prev.sort_values(
                 "amount",
                 ascending=False
-            )[["customer_name", "amount", "payment_method_category"]].head(10)
+            )[["customer_id", "customer_name", "amount", "payment_method_category"]].head(10)
+
+            t2 = add_hs_identity(
+                t2,
+                customer_id_col="customer_id",
+                customer_name_col="customer_name"
+            )
 
             t2["amount"] = t2["amount"].map(format_money)
+            t2["HS ID"] = t2["HS ID"].map(display_hs_value)
+            t2["HS Name"] = t2["HS Name"].map(display_hs_value)
 
             t2 = t2.rename(columns={
                 "customer_name": "Client",
@@ -4931,11 +5793,22 @@ if section_is_visible("stripe-payments"):
                 "payment_method_category": "Method"
             })
 
+            t2 = t2[
+                [
+                    "HS ID",
+                    "HS Name",
+                    "Amount",
+                    "Method"
+                ]
+            ]
+
             render_static_table(t2, height=340)
 
         # ==================================================
         # PAYMENT SUCCESS RATE
         # ==================================================
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+        notion_anchor("stripe-success-rate")
         st.markdown("#### Payment Success Rate")
 
         success_year_options = year_options_only(stripe_df)
@@ -4965,6 +5838,8 @@ if section_is_visible("stripe-payments"):
                     index=0,
                     key="stripe_sheet_success_month"
                 )
+
+            st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
 
             success_source_df = filter_by_month(
                 success_source_df,
@@ -5034,7 +5909,7 @@ if section_is_visible("stripe-payments"):
                 with sr_col4:
                     metric_card(
                         "Success Rate",
-                        f"{success_rate:.1f}%",
+                        f"{success_rate:.0f}%",
                         "stripe-card-blue"
                     )
 
@@ -5087,13 +5962,13 @@ if section_is_visible("stripe-payments"):
                         name="Succeeded",
                         orientation="h",
                         marker_color="#16A34A",
-                        text=status_pivot["Success Rate"].map(lambda x: f"{x:.1f}%"),
+                        text=status_pivot["Success Rate"].map(lambda x: f"{x:.0f}%"),
                         textposition="inside",
                         customdata=status_pivot["Succeeded"],
                         hovertemplate=(
                             "<b>%{y}</b><br>"
                             "Succeeded: %{customdata}<br>"
-                            "Success Rate: %{x:.1f}%"
+                            "Success Rate: %{x:.0f}%"
                             "<extra></extra>"
                         )
                     )
@@ -5106,13 +5981,13 @@ if section_is_visible("stripe-payments"):
                         name="Failed",
                         orientation="h",
                         marker_color="#DC2626",
-                        text=status_pivot["Failed Rate"].map(lambda x: f"{x:.1f}%"),
+                        text=status_pivot["Failed Rate"].map(lambda x: f"{x:.0f}%"),
                         textposition="inside",
                         customdata=status_pivot["Failed"],
                         hovertemplate=(
                             "<b>%{y}</b><br>"
                             "Failed: %{customdata}<br>"
-                            "Failed Rate: %{x:.1f}%"
+                            "Failed Rate: %{x:.0f}%"
                             "<extra></extra>"
                         )
                     )
@@ -5152,8 +6027,8 @@ if section_is_visible("stripe-payments"):
                     ]
                 ].copy()
 
-                success_table["Success Rate"] = success_table["Success Rate"].map(lambda x: f"{x:.1f}%")
-                success_table["Failed Rate"] = success_table["Failed Rate"].map(lambda x: f"{x:.1f}%")
+                success_table["Success Rate"] = success_table["Success Rate"].map(lambda x: f"{x:.0f}%")
+                success_table["Failed Rate"] = success_table["Failed Rate"].map(lambda x: f"{x:.0f}%")
 
                 success_table = success_table.rename(columns={
                     "month_label": "Month"
@@ -5175,6 +6050,7 @@ if section_is_visible("stripe-payments"):
         # ==================================================
         # FAILED PAYMENT REASONS
         # ==================================================
+        notion_anchor("stripe-failed-reasons")
         st.markdown("#### Failed Payment Reasons")
 
         failed_filter_col1, failed_filter_col2 = st.columns(2)
@@ -5261,7 +6137,7 @@ if section_is_visible("stripe-payments"):
             ).reset_index(drop=True)
 
             reason_df["Rank"] = reason_df.index + 1
-            reason_df["Percentage"] = reason_df["Percentage"].map(lambda x: f"{x:.1f}%")
+            reason_df["Percentage"] = reason_df["Percentage"].map(lambda x: f"{x:.0f}%")
 
             reason_df = reason_df.rename(columns={
                 "failure_reason": "Failure Reason",
@@ -5291,6 +6167,7 @@ if section_is_visible("stripe-payments"):
         # ==================================================
         # STRIPE FEES BY MONTH
         # ==================================================
+        notion_anchor("stripe-fees")
         st.markdown("#### Stripe Fees By Month")
 
         fee_df = successful_df[
@@ -5422,14 +6299,19 @@ if section_is_visible("stripe-payments"):
             # ==================================================
             # TOP 10 STRIPE FEES
             # ==================================================
+            notion_anchor("stripe-top-fees")
             st.markdown("#### Top 10 Stripe Fees")
 
             if len(selected_fee_df) > 0:
 
-                fee_customer_df = selected_fee_df.copy()
+                fee_customer_df = add_hs_identity(
+                    selected_fee_df.copy(),
+                    customer_id_col="customer_id",
+                    customer_name_col="customer_name"
+                )
 
                 top_fees_df = fee_customer_df.groupby(
-                    "customer_name",
+                    ["HS ID", "HS Name"],
                     as_index=False
                 ).agg(
                     Payment_Amount=("amount", "sum"),
@@ -5452,16 +6334,18 @@ if section_is_visible("stripe-payments"):
                 top_fees_df["Payment_Amount"] = top_fees_df["Payment_Amount"].map(format_money)
                 top_fees_df["Stripe_Fee"] = top_fees_df["Stripe_Fee"].map(format_money_cents)
                 top_fees_df["Fee %"] = top_fees_df["Fee %"].map(format_share_percent)
+                top_fees_df["HS ID"] = top_fees_df["HS ID"].map(display_hs_value)
+                top_fees_df["HS Name"] = top_fees_df["HS Name"].map(display_hs_value)
 
                 top_fees_df = top_fees_df.rename(columns={
-                    "customer_name": "Customer",
                     "Payment_Amount": "Payment Amount",
                     "Stripe_Fee": "Stripe Fee"
                 })
 
                 top_fees_df = top_fees_df[
                     [
-                        "Customer",
+                        "HS ID",
+                        "HS Name",
                         "Payment Amount",
                         "Stripe Fee",
                         "Fee %"
@@ -5850,7 +6734,8 @@ if section_is_visible("brazil-finance"):
 
         st.markdown("""
         <style>
-        div[data-testid="stNumberInput"] input {
+        div[data-testid="stNumberInput"] input,
+        div[data-testid="stTextInput"] input {
             background: #FFFFFF !important;
             border: 1px solid #E5E7EB !important;
             border-radius: 10px !important;
@@ -5869,6 +6754,7 @@ if section_is_visible("brazil-finance"):
         # ==================================================
         # ITAU BANK PAYMENTS
         # ==================================================
+        notion_anchor("brazil-income")
         st.markdown("### Itau Bank Payments")
 
         itau_sheet_id = "114oEoIZLBWxnXbQlm5qcnmGrmT0WBnAJzpQ6Kvb3XIY"
@@ -5988,7 +6874,7 @@ if section_is_visible("brazil-finance"):
                         ) if show_labels else None,
                         textposition="outside" if show_labels else None,
                         textfont=dict(
-                            size=12,
+                            size=15,
                             color="#334155",
                             family="Arial"
                         ),
@@ -6024,6 +6910,7 @@ if section_is_visible("brazil-finance"):
                 # ==================================================
                 # ITAU BANK PAYMENTS VARIATION
                 # ==================================================
+                notion_anchor("brazil-income-variation")
                 st.markdown("#### Itau Bank Payments Variation vs Previous Month")
 
                 income_variation_source_df = itau_df[
@@ -6167,6 +7054,7 @@ if section_is_visible("brazil-finance"):
             # ==================================================
             # INVESTMENT CHART
             # ==================================================
+            notion_anchor("brazil-investment")
             st.markdown("#### Investment")
 
             if selected_investment_year == "All":
@@ -6236,13 +7124,13 @@ if section_is_visible("brazil-finance"):
                         zeroline=True,
                         zerolinecolor="#CBD5E1",
                         range=[
-                            investment_y_min * 1.18 if investment_y_min < 0 else -10,
+                            investment_y_min * 1.28 if investment_y_min < 0 else -10,
                             0
                         ]
                     )
                 )
 
-                fig_investment = compact_chart_layout(fig_investment, height=300)
+                fig_investment = compact_chart_layout(fig_investment, height=330)
 
                 st.plotly_chart(
                     fig_investment,
@@ -6256,6 +7144,7 @@ if section_is_visible("brazil-finance"):
             # ==================================================
             # COSTS EVOLUTION
             # ==================================================
+            notion_anchor("brazil-costs")
             st.markdown("#### Brazil Costs Evolution")
 
             if selected_cost_year == "All":
@@ -6347,6 +7236,7 @@ if section_is_visible("brazil-finance"):
             # ==================================================
             # COSTS AS % OF INCOME
             # ==================================================
+            notion_anchor("brazil-cost-ratio")
             st.markdown("#### Costs as % of Income")
 
             if selected_ratio_year == "All":
@@ -6478,6 +7368,7 @@ if section_is_visible("brazil-finance"):
             # ==================================================
             # PAYMENT DETAIL
             # ==================================================
+            notion_anchor("brazil-payment-detail")
             st.markdown("#### Payment Detail")
 
             detail_col1, detail_col2 = st.columns(2)
@@ -6583,6 +7474,7 @@ if section_is_visible("brazil-finance"):
             # ==================================================
             # TAXES
             # ==================================================
+            notion_anchor("brazil-taxes")
             st.markdown("#### Taxes Paid By Month")
 
             tax_filter_col1, tax_filter_col2 = st.columns(2)
@@ -6714,6 +7606,7 @@ if section_is_visible("brazil-finance"):
             # ==================================================
             # BALANCE + MANUAL INVESTMENT INPUT
             # ==================================================
+            notion_anchor("brazil-balance-input")
             st.markdown("#### Balance and Investment Input")
 
             balance_candidates = itau_df[
@@ -6738,6 +7631,19 @@ if section_is_visible("brazil-finance"):
                 latest_balance_brl = 0
                 latest_balance_usd = 0
 
+            saved_investment_brl = load_saved_dashboard_number(
+                "Brazil Finance Inputs",
+                "Investment BRL"
+            )
+
+            saved_investment_usd = load_saved_dashboard_number(
+                "Brazil Finance Inputs",
+                "Investment USD"
+            )
+
+            if st.session_state.pop("investment_values_saved", False):
+                st.success("Investment values saved.")
+
             balance_col1, balance_col2, balance_col3, balance_col4 = st.columns(4)
 
             with balance_col1:
@@ -6755,34 +7661,63 @@ if section_is_visible("brazil-finance"):
                 )
 
             with balance_col3:
-                investment_box(
+                card_box(
                     "Investment BRL",
+                    f"R$ {saved_investment_brl:,.0f}",
                     "#7C3AED"
                 )
 
-                investment_brl = st.number_input(
-                    "Investment BRL",
-                    min_value=0.0,
-                    value=0.0,
-                    step=1000.0,
-                    key="manual_investment_brl_v7",
-                    label_visibility="collapsed"
-                )
-
             with balance_col4:
-                investment_box(
+                card_box(
                     "Investment USD",
+                    f"${saved_investment_usd:,.0f}",
                     "#F59E0B"
                 )
 
-                investment_usd = st.number_input(
-                    "Investment USD",
-                    min_value=0.0,
-                    value=0.0,
-                    step=100.0,
-                    key="manual_investment_usd_v7",
-                    label_visibility="collapsed"
+            investment_input_col1, investment_input_col2 = st.columns(2)
+
+            with investment_input_col1:
+                investment_brl_text = st.text_input(
+                    "Investment BRL",
+                    value=f"{saved_investment_brl:,.2f}",
+                    key="manual_investment_brl_v9"
                 )
+
+            with investment_input_col2:
+                investment_usd_text = st.text_input(
+                    "Investment USD",
+                    value=f"{saved_investment_usd:,.2f}",
+                    key="manual_investment_usd_v9"
+                )
+
+            if st.button("Save Investment Values", key="save_investment_values_v9"):
+                investment_brl = parse_flexible_number(
+                    investment_brl_text,
+                    saved_investment_brl
+                )
+
+                investment_usd = parse_flexible_number(
+                    investment_usd_text,
+                    saved_investment_usd
+                )
+
+                save_sheet_comments_batch(
+                    "Brazil Finance Inputs",
+                    [
+                        {
+                            "record_key": "Investment BRL",
+                            "client_name": "Brazil Finance",
+                            "comment": f"{investment_brl:.2f}"
+                        },
+                        {
+                            "record_key": "Investment USD",
+                            "client_name": "Brazil Finance",
+                            "comment": f"{investment_usd:.2f}"
+                        }
+                    ]
+                )
+                st.session_state.investment_values_saved = True
+                st.rerun()
 
         except Exception as e:
             st.error("Brazil finance data could not be loaded.")
@@ -6791,6 +7726,7 @@ if section_is_visible("brazil-finance"):
         # ==================================================
         # PAYMENT REQUESTS
         # ==================================================
+        notion_anchor("brazil-payment-requests")
         st.markdown("### Payment Requests")
 
         payment_request_sheet_id = "1JwBG-K0cdmL0W-EFWHqzJ8ildcUEeCay9-Ul31LWVm0"
@@ -6953,6 +7889,7 @@ if section_is_visible("brazil-finance"):
         # ==================================================
         # NFSE STATUS
         # ==================================================
+        notion_anchor("brazil-nfse")
         st.markdown("### NFSE Status")
 
         nfse_sheet_id = "1pVpJNAPh-9PnEog4d2Ag1MASUiIXZIOnN2ZX-ySBOkk"
@@ -7114,9 +8051,19 @@ if section_is_visible("brazil-finance"):
                 nfse_monthly["Amount_BRL"] > 0
             ].copy()
 
-            nfse_monthly = nfse_monthly.sort_values("MonthSort")
+            nfse_monthly = nfse_monthly.sort_values(
+                "MonthSort",
+                ascending=False
+            )
 
             if len(nfse_monthly) > 0:
+                nfse_month_order_recent = (
+                    nfse_monthly[["MonthSort", "MonthLabel"]]
+                    .drop_duplicates()
+                    .sort_values("MonthSort", ascending=False)["MonthLabel"]
+                    .tolist()
+                )
+                nfse_y_max = nfse_monthly["Amount_BRL"].max()
 
                 fig_nfse = px.bar(
                     nfse_monthly,
@@ -7130,6 +8077,7 @@ if section_is_visible("brazil-finance"):
                         "Pending": "#F59E0B"
                     },
                     category_orders={
+                        "MonthLabel": nfse_month_order_recent,
                         "NFSE Group": ["Authorized", "Pending"]
                     }
                 )
@@ -7145,7 +8093,7 @@ if section_is_visible("brazil-finance"):
                 )
 
                 fig_nfse.update_layout(
-                    height=280,
+                    height=350,
                     plot_bgcolor="#FFFFFF",
                     paper_bgcolor="#FFFFFF",
                     font=dict(
@@ -7158,22 +8106,31 @@ if section_is_visible("brazil-finance"):
                     xaxis=dict(
                         showgrid=False,
                         tickangle=-30,
-                        color="#64748B"
+                        color="#64748B",
+                        categoryorder="array",
+                        categoryarray=nfse_month_order_recent
                     ),
                     yaxis=dict(
                         tickprefix="R$ ",
                         separatethousands=True,
                         gridcolor="rgba(148,163,184,0.18)",
                         zeroline=False,
-                        color="#64748B"
+                        color="#64748B",
+                        range=[
+                            0,
+                            nfse_y_max * 1.34
+                            if nfse_y_max > 0
+                            else 10
+                        ]
                     ),
                     legend=dict(
                         orientation="h",
-                        y=1.05,
+                        y=1.08,
                         x=1,
-                        xanchor="right"
+                        xanchor="right",
+                        yanchor="bottom"
                     ),
-                    margin=dict(l=24, r=24, t=42, b=58),
+                    margin=dict(l=24, r=24, t=118, b=58),
                     hoverlabel=dict(
                         bgcolor="#0F172A",
                         font_color="white"
@@ -7218,7 +8175,7 @@ if section_is_visible("brazil-finance"):
             )
 
             summary_nfse["Pending %"] = summary_nfse["Pending %"].map(
-                lambda x: f"{x:.1f}%"
+                lambda x: f"{x:.0f}%"
             )
 
             summary_nfse = summary_nfse.rename(columns={
