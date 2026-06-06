@@ -1191,11 +1191,6 @@ if selected_currency != "All":
     df = df[df["Currency"] == selected_currency].copy()
 
 # ------------------
-# TITLE
-# ------------------
-st.title("Collections Dashboard 🔥")
-
-# ------------------
 # DASHBOARD TABS
 # ------------------
 SECTION_LABELS = {
@@ -1252,9 +1247,14 @@ active_view = get_query_param("view", "").strip().lower()
 
 if active_view and active_view in VIEW_SECTION_BY_KEY:
     active_section = VIEW_SECTION_BY_KEY[active_view]
+elif active_view:
+    active_view = ""
 
 if active_section not in SECTION_LABELS:
     active_section = "all"
+
+if not active_view:
+    st.title("Collections Dashboard 🔥")
 
 section_links = {
     label: f"?section={section_key}"
@@ -1270,15 +1270,222 @@ with st.sidebar.expander("Notion block links"):
         st.markdown(f"[{label}](?section={section_key}&view={view_key})")
 
 
+STREAMLIT_OUTPUT_METHODS = [
+    "area_chart",
+    "audio",
+    "balloons",
+    "bar_chart",
+    "bokeh_chart",
+    "button",
+    "camera_input",
+    "caption",
+    "checkbox",
+    "code",
+    "color_picker",
+    "data_editor",
+    "dataframe",
+    "date_input",
+    "download_button",
+    "error",
+    "exception",
+    "file_uploader",
+    "form_submit_button",
+    "graphviz_chart",
+    "header",
+    "html",
+    "image",
+    "info",
+    "json",
+    "latex",
+    "line_chart",
+    "map",
+    "markdown",
+    "metric",
+    "multiselect",
+    "number_input",
+    "plotly_chart",
+    "pydeck_chart",
+    "radio",
+    "scatter_chart",
+    "select_slider",
+    "selectbox",
+    "slider",
+    "snow",
+    "subheader",
+    "success",
+    "table",
+    "tabs",
+    "text",
+    "text_area",
+    "text_input",
+    "time_input",
+    "title",
+    "toast",
+    "toggle",
+    "vega_lite_chart",
+    "video",
+    "warning",
+    "write"
+]
+
+STREAMLIT_LAYOUT_METHODS = [
+    "columns",
+    "container",
+    "empty",
+    "expander",
+    "form",
+    "popover"
+]
+
+_ORIGINAL_STREAMLIT_METHODS = {}
+_NOTION_VIEW_STATE = {
+    "rendering": not active_view,
+    "started": False
+}
+
+
+class SilentStreamlitBlock:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+    def __getattr__(self, name):
+        def silent_method(*args, **kwargs):
+            return silent_streamlit_return(name, args, kwargs)
+
+        return silent_method
+
+
+def silent_streamlit_return(method_name, args, kwargs):
+    if method_name in ["button", "checkbox", "download_button", "form_submit_button", "toggle"]:
+        return False
+
+    if method_name == "data_editor":
+        return args[0] if args else pd.DataFrame()
+
+    if method_name == "selectbox":
+        options = args[1] if len(args) > 1 else kwargs.get("options", [])
+        index = kwargs.get("index", 0)
+        options = list(options)
+        return options[index] if len(options) > index else None
+
+    if method_name == "radio":
+        options = args[1] if len(args) > 1 else kwargs.get("options", [])
+        index = kwargs.get("index", 0)
+        options = list(options)
+        return options[index] if len(options) > index else None
+
+    if method_name == "multiselect":
+        return kwargs.get("default", [])
+
+    if method_name == "slider":
+        return kwargs.get("value", args[2] if len(args) > 2 else None)
+
+    if method_name == "select_slider":
+        return kwargs.get("value", None)
+
+    if method_name == "number_input":
+        return kwargs.get("value", 0)
+
+    if method_name in ["text_area", "text_input"]:
+        return kwargs.get("value", "")
+
+    if method_name in ["date_input", "time_input"]:
+        return kwargs.get("value", None)
+
+    if method_name == "file_uploader":
+        return None
+
+    return None
+
+
+def guarded_streamlit_method(method_name):
+    original_method = _ORIGINAL_STREAMLIT_METHODS[method_name]
+
+    def wrapped(*args, **kwargs):
+        if _NOTION_VIEW_STATE["rendering"]:
+            return original_method(*args, **kwargs)
+
+        return silent_streamlit_return(method_name, args, kwargs)
+
+    return wrapped
+
+
+def guarded_streamlit_layout(method_name):
+    original_method = _ORIGINAL_STREAMLIT_METHODS[method_name]
+
+    def wrapped(*args, **kwargs):
+        if _NOTION_VIEW_STATE["rendering"]:
+            return original_method(*args, **kwargs)
+
+        if method_name == "columns":
+            spec = args[0] if args else kwargs.get("spec", 1)
+            count = len(spec) if isinstance(spec, (list, tuple)) else int(spec)
+            return [SilentStreamlitBlock() for _ in range(count)]
+
+        return SilentStreamlitBlock()
+
+    return wrapped
+
+
+def guarded_streamlit_dialog(*args, **kwargs):
+    original_dialog = _ORIGINAL_STREAMLIT_METHODS["dialog"]
+
+    if _NOTION_VIEW_STATE["rendering"]:
+        return original_dialog(*args, **kwargs)
+
+    def silent_decorator(function):
+        return function
+
+    return silent_decorator
+
+
+def install_notion_view_renderer():
+    if not active_view:
+        return
+
+    for method_name in STREAMLIT_OUTPUT_METHODS + STREAMLIT_LAYOUT_METHODS + ["dialog"]:
+        if hasattr(st, method_name):
+            _ORIGINAL_STREAMLIT_METHODS[method_name] = getattr(st, method_name)
+
+    for method_name in STREAMLIT_OUTPUT_METHODS:
+        if method_name in _ORIGINAL_STREAMLIT_METHODS:
+            setattr(st, method_name, guarded_streamlit_method(method_name))
+
+    for method_name in STREAMLIT_LAYOUT_METHODS:
+        if method_name in _ORIGINAL_STREAMLIT_METHODS:
+            setattr(st, method_name, guarded_streamlit_layout(method_name))
+
+    if "dialog" in _ORIGINAL_STREAMLIT_METHODS:
+        st.dialog = guarded_streamlit_dialog
+
+
 def notion_anchor(view_key):
-    st.markdown(
-        f"<div id='{view_key}' style='height:1px;'></div>",
-        unsafe_allow_html=True
-    )
+    if active_view:
+        if _NOTION_VIEW_STATE["started"] and view_key != active_view:
+            st.stop()
+
+        _NOTION_VIEW_STATE["rendering"] = view_key == active_view
+
+        if view_key == active_view:
+            _NOTION_VIEW_STATE["started"] = True
+
+    markdown_method = _ORIGINAL_STREAMLIT_METHODS.get("markdown", st.markdown)
+
+    if not active_view or view_key == active_view:
+        markdown_method(
+            f"<div id='{view_key}' style='height:1px;'></div>",
+            unsafe_allow_html=True
+        )
 
 
 def section_is_visible(section_key):
     return active_section == "all" or active_section == section_key
+
+
+install_notion_view_renderer()
 
 
 if active_view:
