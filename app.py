@@ -7640,8 +7640,8 @@ if section_is_visible("brazil-finance"):
                 ].abs()
 
                 detail_selected_df = detail_selected_df.sort_values(
-                    "Abs Amount",
-                    ascending=False
+                    ["Date", "Abs Amount"],
+                    ascending=[False, False]
                 )
 
                 detail_table = detail_selected_df[
