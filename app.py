@@ -3323,33 +3323,76 @@ if section_is_visible("invoice-volume"):
         st.markdown("#### Monthly Billing Churn Cases")
         st.caption(
             "Clients billed in the previous month but not billed again in the selected month. "
+            "Clients are matched by HS ID first, then Stripe Customer ID. "
             "Only invoices with Due Date are included."
         )
 
         churn_df = df[
             (df["Creation Date"].notna()) &
-            (df["Due Date"].notna()) &
-            (df["Customer name"].notna())
+            (df["Due Date"].notna())
         ].copy()
 
-        churn_df["Customer name"] = (
-            churn_df["Customer name"]
-            .astype(str)
-            .str.strip()
+        for identity_col in ["ID", "Customer name", "HS ID", "HS Name"]:
+            if identity_col not in churn_df.columns:
+                churn_df[identity_col] = ""
+
+            churn_df[identity_col] = churn_df[identity_col].map(
+                clean_identity_value
+            )
+
+        def build_churn_client_key(row):
+            hs_id = clean_identity_value(row.get("HS ID", ""))
+            customer_id = clean_identity_value(row.get("ID", ""))
+
+            if hs_id:
+                return f"hs:{hs_id}"
+
+            if customer_id:
+                return f"stripe:{customer_id}"
+
+            return ""
+
+        churn_df["Client Key"] = churn_df.apply(
+            build_churn_client_key,
+            axis=1
         )
 
-        churn_df = churn_df[
-            churn_df["Customer name"] != ""
-        ].copy()
+        churn_df["Client"] = churn_df.apply(
+            lambda row: (
+                clean_identity_value(row.get("HS Name", ""))
+                or clean_identity_value(row.get("Customer name", ""))
+                or clean_identity_value(row.get("ID", ""))
+            ),
+            axis=1
+        )
+
+        churn_df = churn_df[churn_df["Client Key"] != ""].copy()
 
         churn_df["MonthSort"] = churn_df["Creation Date"].dt.to_period("M")
         churn_df["MonthLabel"] = churn_df["Creation Date"].dt.strftime("%Y-%b")
         churn_df["Year"] = churn_df["Creation Date"].dt.year.astype(int)
 
+        def first_clean_value(series):
+            for item in series:
+                value = clean_identity_value(item)
+
+                if value:
+                    return value
+
+            return ""
+
         monthly_client_amount = churn_df.groupby(
-            ["MonthSort", "MonthLabel", "Year", "Customer name", "HS ID", "HS Name"],
+            ["MonthSort", "MonthLabel", "Year", "Client Key"],
             as_index=False
-        )["Amount Fixed (USD)"].sum()
+        ).agg(
+            **{
+                "Amount Fixed (USD)": ("Amount Fixed (USD)", "sum"),
+                "Client": ("Client", first_clean_value),
+                "Customer ID": ("ID", first_clean_value),
+                "HS ID": ("HS ID", first_clean_value),
+                "HS Name": ("HS Name", first_clean_value)
+            }
+        )
 
         all_months = (
             monthly_client_amount[["MonthSort", "MonthLabel", "Year"]]
@@ -3377,8 +3420,8 @@ if section_is_visible("invoice-volume"):
                 monthly_client_amount["MonthSort"] == current_month
             ].copy()
 
-            previous_clients = set(previous_data["Customer name"])
-            current_clients = set(current_data["Customer name"])
+            previous_clients = set(previous_data["Client Key"])
+            current_clients = set(current_data["Client Key"])
 
             churn_clients = sorted(previous_clients - current_clients)
 
@@ -3386,10 +3429,10 @@ if section_is_visible("invoice-volume"):
 
             valid_churn_clients = []
 
-            for client in churn_clients:
+            for client_key in churn_clients:
 
                 client_history_before_current = monthly_client_amount[
-                    (monthly_client_amount["Customer name"] == client) &
+                    (monthly_client_amount["Client Key"] == client_key) &
                     (monthly_client_amount["MonthSort"] < current_month)
                 ].copy()
 
@@ -3411,7 +3454,7 @@ if section_is_visible("invoice-volume"):
                 ]
 
                 last_3_data = monthly_client_amount[
-                    (monthly_client_amount["Customer name"] == client) &
+                    (monthly_client_amount["Client Key"] == client_key) &
                     (monthly_client_amount["MonthSort"].isin(last_3_months))
                 ].copy()
 
@@ -3422,7 +3465,7 @@ if section_is_visible("invoice-volume"):
                 if avg_last_3_months < 100:
                     continue
 
-                valid_churn_clients.append(client)
+                valid_churn_clients.append(client_key)
 
                 percent_of_period_billing = (
                     avg_last_3_months / current_total_billing * 100
@@ -3434,9 +3477,14 @@ if section_is_visible("invoice-volume"):
                     "MonthSort": current_month,
                     "Month": current_label,
                     "Year": current_year,
-                    "Client": client,
+                    "Client Key": client_key,
+                    "Client": client_identity.get("Client", ""),
+                    "Customer ID": client_identity.get("Customer ID", ""),
                     "HS ID": client_identity.get("HS ID", ""),
-                    "HS Name": client_identity.get("HS Name", client),
+                    "HS Name": client_identity.get(
+                        "HS Name",
+                        client_identity.get("Client", "")
+                    ),
                     "Last Invoice Sent": last_invoice_label,
                     "Avg Last 3 Months Billed": avg_last_3_months,
                     "% of Period Billing": percent_of_period_billing
@@ -3584,7 +3632,7 @@ if section_is_visible("invoice-volume"):
                     selected_churn_detail["Comment Key"] = (
                         selected_churn_detail["Month"].astype(str) +
                         " - " +
-                        selected_churn_detail["Client"].astype(str)
+                        selected_churn_detail["Client Key"].astype(str)
                     )
 
                     selected_churn_detail = add_comments_from_sheet(
