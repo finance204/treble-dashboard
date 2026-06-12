@@ -782,6 +782,57 @@ def save_sheet_comment_aliases(table_name, rows):
     save_sheet_comments_batch(table_name, alias_rows)
 
 
+def comment_alias_keys(row, primary_key="", customer_col="Customer name"):
+    keys = [
+        clean_identity_value(primary_key),
+        clean_identity_value(row.get("HS ID", "")),
+        clean_identity_value(row.get("Customer name", "")),
+        clean_identity_value(row.get(customer_col, "")),
+        clean_identity_value(row.get("HS Name", ""))
+    ]
+
+    alias_keys = []
+
+    for key in keys:
+        if key and key != "-" and key not in alias_keys:
+            alias_keys.append(key)
+
+    return alias_keys
+
+
+def add_latest_comments_by_alias(
+    dataframe,
+    table_name,
+    aliases_col="Comment Keys"
+):
+    comments_df = load_dashboard_comments()
+
+    if len(comments_df) == 0 or aliases_col not in dataframe.columns:
+        return dataframe
+
+    def resolve_comment(row):
+        latest = latest_dashboard_comment_for_keys(
+            comments_df,
+            table_name,
+            row.get(aliases_col, [])
+        )
+
+        latest_comment = clean_identity_value(latest.get("Comment", ""))
+        latest_status = normalize_dashboard_text(
+            latest.get("Collection Status", "")
+        )
+
+        if latest_comment:
+            row["Comments"] = latest_comment
+
+        if "Collection Status" in dataframe.columns and latest_status:
+            row["Collection Status"] = latest_status
+
+        return row
+
+    return dataframe.apply(resolve_comment, axis=1)
+
+
 def editor_has_changes(editor_key):
     editor_state = st.session_state.get(editor_key, {})
 
@@ -940,7 +991,16 @@ def render_comment_picker_table(
     def edit_comment_dialog(row_data):
         client_label = clean_identity_value(row_data.get(client_col, ""))
         record_key = clean_identity_value(row_data.get(record_col, ""))
+        comment_keys = row_data.get("Comment Keys", [record_key])
         current_comment = clean_identity_value(row_data.get("Comments", ""))
+
+        if not isinstance(comment_keys, list):
+            comment_keys = [record_key]
+
+        comment_keys = [
+            key for key in comment_keys
+            if clean_identity_value(key) and clean_identity_value(key) != "-"
+        ]
 
         st.markdown("""
         <style>
@@ -1069,21 +1129,17 @@ def render_comment_picker_table(
             key=widget_key(key, record_key, "save"),
             use_container_width=True
         ):
-            remember_comment_overrides(
+            save_sheet_comment_aliases(
                 table_name,
-                [{
-                    "record_key": record_key,
-                    "comment": edited_comment,
-                    "collection_status": selected_status
-                }]
-            )
-
-            save_sheet_comment(
-                table_name,
-                record_key,
-                client_label,
-                edited_comment,
-                selected_status
+                [
+                    {
+                        "record_key": alias_key,
+                        "client_name": client_label,
+                        "comment": edited_comment,
+                        "collection_status": selected_status
+                    }
+                    for alias_key in comment_keys
+                ]
             )
 
             st.session_state[f"{key}_comment_saved"] = True
@@ -2564,11 +2620,22 @@ if section_is_visible("aging"):
             )
 
             bad_clients["Collection Status"] = ""
+            bad_clients["Comment Keys"] = bad_clients.apply(
+                lambda row: comment_alias_keys(
+                    row,
+                    primary_key=row.get("Customer name", "")
+                ),
+                axis=1
+            )
 
             bad_clients = add_comments_from_sheet(
                 bad_clients,
                 "Clients Over 90",
                 "Customer name"
+            )
+            bad_clients = add_latest_comments_by_alias(
+                bad_clients,
+                "Clients Over 90"
             )
 
             for col in over_90_bucket_order + ["Total Open"]:
@@ -2581,10 +2648,14 @@ if section_is_visible("aging"):
             over90_table_height = min(max(over90_table_height, 170), 420)
 
             over90_editor_df = bad_clients.copy().reset_index(drop=True)
+            over90_display_df = over90_editor_df.drop(
+                columns=["Comment Keys"],
+                errors="ignore"
+            )
 
             with st.form("clients_over_90_comments_form"):
                 edited_bad = st.data_editor(
-                    over90_editor_df,
+                    over90_display_df,
                     key="clients_over_90_editor_compact",
                     use_container_width=True,
                     height=380,
@@ -2636,14 +2707,18 @@ if section_is_visible("aging"):
                 over90_rows_to_save = []
 
                 for row_index, row in edited_bad_to_save.iterrows():
-                    over90_rows_to_save.append({
-                        "record_key": over90_editor_df.iloc[row_index]["Customer name"],
-                        "client_name": row["HS Name"],
-                        "comment": row["Comments"],
-                        "collection_status": row["Collection Status"]
-                    })
+                    source_row = over90_editor_df.iloc[row_index]
+                    alias_keys = source_row.get("Comment Keys", [])
 
-                save_sheet_comments_batch(
+                    for alias_key in alias_keys:
+                        over90_rows_to_save.append({
+                            "record_key": alias_key,
+                            "client_name": row["HS Name"],
+                            "comment": row["Comments"],
+                            "collection_status": row["Collection Status"]
+                        })
+
+                save_sheet_comment_aliases(
                     "Clients Over 90",
                     over90_rows_to_save
                 )
