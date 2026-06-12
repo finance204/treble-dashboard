@@ -712,6 +712,76 @@ def save_sheet_comments_batch(table_name, rows):
         st.warning(f"Comments could not be saved to Google Sheets: {e}")
 
 
+def dashboard_comment_updated_at(row):
+    updated_at = pd.to_datetime(
+        row.get("Updated At", ""),
+        errors="coerce"
+    )
+
+    if pd.isna(updated_at):
+        return pd.Timestamp.min
+
+    return updated_at
+
+
+def latest_dashboard_comment_for_keys(comments_df, table_name, record_keys):
+    if len(comments_df) == 0:
+        return {"Comment": "", "Collection Status": ""}
+
+    cleaned_keys = [
+        clean_identity_value(record_key)
+        for record_key in record_keys
+        if clean_identity_value(record_key)
+    ]
+
+    if not cleaned_keys:
+        return {"Comment": "", "Collection Status": ""}
+
+    matches = comments_df[
+        (comments_df["Table"].astype(str) == str(table_name)) &
+        (comments_df["Record Key"].astype(str).isin(cleaned_keys))
+    ].copy()
+
+    if len(matches) == 0:
+        return {"Comment": "", "Collection Status": ""}
+
+    matches["_updated_at_sort"] = matches.apply(
+        dashboard_comment_updated_at,
+        axis=1
+    )
+    matches = matches.sort_values("_updated_at_sort", ascending=False)
+
+    for _, row in matches.iterrows():
+        comment = clean_identity_value(row.get("Comment", ""))
+        collection_status = normalize_dashboard_text(
+            row.get("Collection Status", "")
+        )
+
+        if comment or collection_status:
+            return {
+                "Comment": comment,
+                "Collection Status": collection_status
+            }
+
+    return {"Comment": "", "Collection Status": ""}
+
+
+def save_sheet_comment_aliases(table_name, rows):
+    alias_rows = []
+    seen_keys = set()
+
+    for row in rows:
+        record_key = clean_identity_value(row.get("record_key", ""))
+
+        if not record_key or record_key in seen_keys:
+            continue
+
+        seen_keys.add(record_key)
+        alias_rows.append(row)
+
+    save_sheet_comments_batch(table_name, alias_rows)
+
+
 def editor_has_changes(editor_key):
     editor_state = st.session_state.get(editor_key, {})
 
@@ -841,6 +911,215 @@ def render_comments_form(
         submitted = st.form_submit_button("Save Comments")
 
     return submitted, rows_to_save
+
+
+def render_comment_picker_table(
+    table_name,
+    dataframe,
+    record_col,
+    client_col,
+    column_order,
+    column_config,
+    disabled_cols,
+    key,
+    height=360,
+    summary_cols=None,
+    status_col=None,
+    status_options=None
+):
+    if len(dataframe) == 0:
+        st.info("No data available.")
+        return
+
+    if st.session_state.pop(f"{key}_comment_saved", False):
+        st.success("Comment saved.")
+
+    summary_cols = summary_cols or []
+
+    @st.dialog(f"Edit Client Comment - {table_name}", width="large")
+    def edit_comment_dialog(row_data):
+        client_label = clean_identity_value(row_data.get(client_col, ""))
+        record_key = clean_identity_value(row_data.get(record_col, ""))
+        current_comment = clean_identity_value(row_data.get("Comments", ""))
+
+        st.markdown("""
+        <style>
+        .comment-modal-title {
+            font-size:20px;
+            font-weight:800;
+            color:#111827;
+            margin-bottom:12px;
+        }
+        .comment-modal-summary {
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(110px,1fr));
+            gap:8px;
+            margin:8px 0 16px 0;
+        }
+        .comment-modal-card {
+            border:1px solid #E5E7EB;
+            border-radius:8px;
+            background:#F8FAFC;
+            padding:8px 10px;
+            min-height:50px;
+            overflow:hidden;
+        }
+        .comment-modal-card-label {
+            color:#6B7280;
+            font-size:11px;
+            font-weight:650;
+            line-height:1.1;
+            margin-bottom:5px;
+            white-space:nowrap;
+            overflow:hidden;
+            text-overflow:ellipsis;
+        }
+        .comment-modal-card-value {
+            color:#111827;
+            font-size:13px;
+            font-weight:750;
+            line-height:1.15;
+            white-space:nowrap;
+            overflow:hidden;
+            text-overflow:ellipsis;
+        }
+        div[data-testid="stDialog"] textarea {
+            min-height:190px !important;
+            font-size:14px !important;
+            line-height:1.32 !important;
+        }
+        div[data-testid="stDialog"] div[data-testid="stHorizontalBlock"] button {
+            border-radius:8px !important;
+            min-height:38px !important;
+            padding:0 10px !important;
+            font-weight:750 !important;
+            white-space:nowrap !important;
+            width:100% !important;
+        }
+        div[data-testid="stDialog"] div[data-testid="stHorizontalBlock"] > div:nth-child(1) button {
+            background:#16A34A !important;
+            border-color:#16A34A !important;
+            color:#FFFFFF !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+        st.markdown(
+            f"<div class='comment-modal-title'>Comment - {html.escape(client_label)}</div>",
+            unsafe_allow_html=True
+        )
+
+        if summary_cols:
+            visible_summary_cols = [
+                col for col in summary_cols
+                if col in row_data and clean_identity_value(row_data.get(col, ""))
+            ][:5]
+
+            summary_cards = []
+
+            for col_name in visible_summary_cols:
+                value = clean_identity_value(row_data.get(col_name, ""))
+                value = (
+                    value
+                    .replace("🔴", "")
+                    .replace("🟠", "")
+                    .replace("🟢", "")
+                    .strip()
+                )
+
+                summary_cards.append(
+                    f"""
+                    <div class="comment-modal-card">
+                        <div class="comment-modal-card-label">{html.escape(str(col_name))}</div>
+                        <div class="comment-modal-card-value">{html.escape(value)}</div>
+                    </div>
+                    """
+                )
+
+            st.markdown(
+                f"<div class='comment-modal-summary'>{''.join(summary_cards)}</div>",
+                unsafe_allow_html=True
+            )
+
+        selected_status = ""
+
+        if status_col:
+            current_status = clean_identity_value(row_data.get(status_col, ""))
+            options = status_options or [""]
+            status_index = options.index(current_status) if current_status in options else 0
+            selected_status = st.selectbox(
+                status_col,
+                options,
+                index=status_index,
+                key=widget_key(key, record_key, "status")
+            )
+
+        edited_comment = st.text_area(
+            "Comment",
+            value=current_comment,
+            height=230,
+            key=widget_key(key, record_key, "comment")
+        )
+
+        action_col1, action_col2 = st.columns([1.15, 6.85])
+
+        if action_col1.button(
+            "Save",
+            type="primary",
+            key=widget_key(key, record_key, "save"),
+            use_container_width=True
+        ):
+            remember_comment_overrides(
+                table_name,
+                [{
+                    "record_key": record_key,
+                    "comment": edited_comment,
+                    "collection_status": selected_status
+                }]
+            )
+
+            save_sheet_comment(
+                table_name,
+                record_key,
+                client_label,
+                edited_comment,
+                selected_status
+            )
+
+            st.session_state[f"{key}_comment_saved"] = True
+            st.session_state[f"{key}_skip_dialog_once"] = True
+            st.rerun()
+
+    selection = st.dataframe(
+        dataframe,
+        key=key,
+        use_container_width=True,
+        height=height,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        column_order=column_order,
+        column_config=column_config
+    )
+
+    selected_rows = list(selection.selection.rows)
+
+    if st.session_state.pop(f"{key}_skip_dialog_once", False):
+        selected_rows = []
+
+    previous_selected_rows = st.session_state.get(
+        f"{key}_last_selected_rows",
+        []
+    )
+
+    selection_changed = selected_rows != previous_selected_rows
+    st.session_state[f"{key}_last_selected_rows"] = selected_rows
+
+    if selected_rows and selection_changed:
+        selected_row_index = selected_rows[0]
+        edit_comment_dialog(
+            dataframe.iloc[selected_row_index].to_dict()
+        )
 
 
 if st.sidebar.button("🔄 Refresh Data"):
@@ -1939,32 +2218,40 @@ if section_is_visible("aging"):
                 axis=1
             )
 
+            pivot_risk["Comment Keys"] = pivot_risk.apply(
+                lambda row: [
+                    clean_identity_value(row.get("Record Key", "")),
+                    clean_identity_value(row.get("HS ID", "")),
+                    clean_identity_value(row.get("Customer name", "")),
+                    clean_identity_value(row.get("HS Name", ""))
+                ],
+                axis=1
+            )
+
             pivot_risk = add_comments_from_sheet(
                 pivot_risk,
                 "Clients at Risk",
                 "Record Key"
             )
 
-            legacy_risk_comments = load_dashboard_comments()
+            risk_comments = load_dashboard_comments()
 
-            if len(legacy_risk_comments) > 0:
-                legacy_risk_comments = legacy_risk_comments[
-                    legacy_risk_comments["Table"].astype(str) == "Clients at Risk"
-                ].copy()
+            if len(risk_comments) > 0:
+                def resolve_latest_risk_comment(row):
+                    latest_comment = latest_dashboard_comment_for_keys(
+                        risk_comments,
+                        "Clients at Risk",
+                        row.get("Comment Keys", [])
+                    ).get("Comment", "")
 
-                legacy_comment_map = legacy_risk_comments.set_index(
-                    "Record Key"
-                )["Comment"].to_dict()
+                    return (
+                        latest_comment
+                        if clean_identity_value(latest_comment)
+                        else clean_identity_value(row.get("Comments", ""))
+                    )
 
                 pivot_risk["Comments"] = pivot_risk.apply(
-                    lambda row: (
-                        row["Comments"]
-                        if clean_identity_value(row.get("Comments", ""))
-                        else legacy_comment_map.get(
-                            clean_identity_value(row.get("Customer name", "")),
-                            ""
-                        )
-                    ),
+                    resolve_latest_risk_comment,
                     axis=1
                 )
 
@@ -1996,7 +2283,16 @@ if section_is_visible("aging"):
             def edit_risk_comment_dialog(row_data):
                 client_label = clean_identity_value(row_data.get("HS Name", ""))
                 record_key = clean_identity_value(row_data.get("Record Key", ""))
+                comment_keys = row_data.get("Comment Keys", [])
                 current_comment = clean_identity_value(row_data.get("Comments", ""))
+
+                if not isinstance(comment_keys, list):
+                    comment_keys = [record_key]
+
+                comment_keys = [
+                    key for key in comment_keys
+                    if clean_identity_value(key) and clean_identity_value(key) != "-"
+                ]
 
                 st.markdown("""
                 <style>
@@ -2112,20 +2408,17 @@ if section_is_visible("aging"):
                     key=widget_key("save_risk_comment", record_key),
                     use_container_width=True
                 ):
-                    remember_comment_overrides(
+                    save_sheet_comment_aliases(
                         "Clients at Risk",
-                        [{
-                            "record_key": record_key,
-                            "comment": edited_comment,
-                            "collection_status": ""
-                        }]
-                    )
-
-                    save_sheet_comment(
-                        "Clients at Risk",
-                        record_key,
-                        client_label,
-                        edited_comment
+                        [
+                            {
+                                "record_key": alias_key,
+                                "client_name": client_label,
+                                "comment": edited_comment,
+                                "collection_status": ""
+                            }
+                            for alias_key in comment_keys
+                        ]
                     )
 
                     st.session_state.risk_comment_saved = True
@@ -2308,30 +2601,12 @@ if section_is_visible("aging"):
                         "Comments"
                     ],
                     column_config={
-                        "HS ID": st.column_config.TextColumn(
-                            "HS ID",
-                            width="small"
-                        ),
-                        "HS Name": st.column_config.TextColumn(
-                            "HS Name",
-                            width="medium"
-                        ),
-                        "91-120": st.column_config.TextColumn(
-                            "91-120",
-                            width="small"
-                        ),
-                        "121-360": st.column_config.TextColumn(
-                            "121-360",
-                            width="small"
-                        ),
-                        ">360": st.column_config.TextColumn(
-                            ">360",
-                            width="small"
-                        ),
-                        "Total Open": st.column_config.TextColumn(
-                            "Total Open",
-                            width="small"
-                        ),
+                        "HS ID": st.column_config.TextColumn("HS ID", width="small"),
+                        "HS Name": st.column_config.TextColumn("HS Name", width="medium"),
+                        "91-120": st.column_config.TextColumn("91-120", width="small"),
+                        "121-360": st.column_config.TextColumn("121-360", width="small"),
+                        ">360": st.column_config.TextColumn(">360", width="small"),
+                        "Total Open": st.column_config.TextColumn("Total Open", width="small"),
                         "Collection Status": st.column_config.SelectboxColumn(
                             "Collection Status",
                             options=[
@@ -2342,10 +2617,7 @@ if section_is_visible("aging"):
                             width="medium",
                             required=False
                         ),
-                        "Comments": st.column_config.TextColumn(
-                            "Comments",
-                            width="large"
-                        )
+                        "Comments": st.column_config.TextColumn("Comments", width="large")
                     },
                     disabled=[
                         "HS ID",
@@ -3668,7 +3940,7 @@ if section_is_visible("invoice-volume"):
                             "% of Period Billing",
                             "Comments"
                         ]
-                    ].copy()
+                    ].copy().reset_index(drop=True)
 
                     st.markdown(
                         f"#### Churn Detail - {selected_churn_month}"
@@ -3731,7 +4003,7 @@ if section_is_visible("invoice-volume"):
                             "Churn Detail",
                             [
                                 {
-                                    "record_key": selected_churn_detail_editor.loc[row_index, "Comment Key"],
+                                    "record_key": selected_churn_detail_editor.iloc[row_index]["Comment Key"],
                                     "client_name": row["HS Name"],
                                     "comment": row["Comments"]
                                 }
@@ -3945,7 +4217,7 @@ if section_is_visible("invoice-volume"):
                                 "Currency",
                                 "Comments"
                             ]
-                        ].copy()
+                        ].copy().reset_index(drop=True)
 
                         with st.form("credit_notes_detail_comments_form"):
                             edited_credit_notes_detail = st.data_editor(
@@ -3965,38 +4237,14 @@ if section_is_visible("invoice-volume"):
                                     "Comments"
                                 ],
                                 column_config={
-                                    "HS ID": st.column_config.TextColumn(
-                                        "HS ID",
-                                        width="small"
-                                    ),
-                                    "HS Name": st.column_config.TextColumn(
-                                        "HS Name",
-                                        width="medium"
-                                    ),
-                                    "Credit Note Date": st.column_config.TextColumn(
-                                        "Credit Note Date",
-                                        width="small"
-                                    ),
-                                    "Credit Note": st.column_config.TextColumn(
-                                        "Credit Note",
-                                        width="small"
-                                    ),
-                                    "Invoice": st.column_config.TextColumn(
-                                        "Invoice",
-                                        width="small"
-                                    ),
-                                    "Amount": st.column_config.TextColumn(
-                                        "Amount",
-                                        width="small"
-                                    ),
-                                    "Currency": st.column_config.TextColumn(
-                                        "Currency",
-                                        width="small"
-                                    ),
-                                    "Comments": st.column_config.TextColumn(
-                                        "Comments",
-                                        width="large"
-                                    )
+                                    "HS ID": st.column_config.TextColumn("HS ID", width="small"),
+                                    "HS Name": st.column_config.TextColumn("HS Name", width="medium"),
+                                    "Credit Note Date": st.column_config.TextColumn("Credit Note Date", width="small"),
+                                    "Credit Note": st.column_config.TextColumn("Credit Note", width="small"),
+                                    "Invoice": st.column_config.TextColumn("Invoice", width="small"),
+                                    "Amount": st.column_config.TextColumn("Amount", width="small"),
+                                    "Currency": st.column_config.TextColumn("Currency", width="small"),
+                                    "Comments": st.column_config.TextColumn("Comments", width="large")
                                 },
                                 disabled=[
                                     "HS ID",
@@ -4256,7 +4504,7 @@ if section_is_visible("invoice-volume"):
                                 "Status",
                                 "Comments"
                             ]
-                        ].copy()
+                        ].copy().reset_index(drop=True)
 
                         with st.form("refunds_detail_comments_form"):
                             edited_refunds_detail = st.data_editor(
@@ -4275,34 +4523,13 @@ if section_is_visible("invoice-volume"):
                                     "Comments"
                                 ],
                                 column_config={
-                                    "HS ID": st.column_config.TextColumn(
-                                        "HS ID",
-                                        width="small"
-                                    ),
-                                    "HS Name": st.column_config.TextColumn(
-                                        "HS Name",
-                                        width="medium"
-                                    ),
-                                    "Refund Date": st.column_config.TextColumn(
-                                        "Refund Date",
-                                        width="small"
-                                    ),
-                                    "Amount": st.column_config.TextColumn(
-                                        "Amount",
-                                        width="small"
-                                    ),
-                                    "Currency": st.column_config.TextColumn(
-                                        "Currency",
-                                        width="small"
-                                    ),
-                                    "Status": st.column_config.TextColumn(
-                                        "Status",
-                                        width="small"
-                                    ),
-                                    "Comments": st.column_config.TextColumn(
-                                        "Comments",
-                                        width="large"
-                                    )
+                                    "HS ID": st.column_config.TextColumn("HS ID", width="small"),
+                                    "HS Name": st.column_config.TextColumn("HS Name", width="medium"),
+                                    "Refund Date": st.column_config.TextColumn("Refund Date", width="small"),
+                                    "Amount": st.column_config.TextColumn("Amount", width="small"),
+                                    "Currency": st.column_config.TextColumn("Currency", width="small"),
+                                    "Status": st.column_config.TextColumn("Status", width="small"),
+                                    "Comments": st.column_config.TextColumn("Comments", width="large")
                                 },
                                 disabled=[
                                     "HS ID",
