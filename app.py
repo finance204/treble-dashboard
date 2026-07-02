@@ -173,8 +173,6 @@ def require_google_login():
 
 
 def require_dashboard_access():
-    return
-
     auth_enabled = is_enabled(
         get_secret_or_env("DASHBOARD_AUTH_ENABLED", "false")
     )
@@ -846,6 +844,25 @@ def editor_has_changes(editor_key):
     )
 
 
+def get_selected_dataframe_rows(selection):
+    if selection is None:
+        return []
+
+    try:
+        rows = selection.selection.rows
+        return list(rows) if rows is not None else []
+    except AttributeError:
+        pass
+
+    if isinstance(selection, dict):
+        selection_data = selection.get("selection", {})
+
+        if isinstance(selection_data, dict):
+            return list(selection_data.get("rows", []) or [])
+
+    return []
+
+
 def widget_key(*parts):
     raw_key = "||".join("" if pd.isna(part) else str(part) for part in parts)
     return re.sub(r"[^A-Za-z0-9_]+", "_", raw_key)[:220]
@@ -1127,7 +1144,7 @@ def render_comment_picker_table(
             "Save",
             type="primary",
             key=widget_key(key, record_key, "save"),
-            use_container_width=True
+            width="stretch"
         ):
             save_sheet_comment_aliases(
                 table_name,
@@ -1149,7 +1166,7 @@ def render_comment_picker_table(
     selection = st.dataframe(
         dataframe,
         key=key,
-        use_container_width=True,
+        width="stretch",
         height=height,
         hide_index=True,
         on_select="rerun",
@@ -1158,7 +1175,7 @@ def render_comment_picker_table(
         column_config=column_config
     )
 
-    selected_rows = list(selection.selection.rows)
+    selected_rows = get_selected_dataframe_rows(selection)
 
     if st.session_state.pop(f"{key}_skip_dialog_once", False):
         selected_rows = []
@@ -1998,18 +2015,6 @@ if section_is_visible("aging"):
         notion_anchor("aging-past-due")
         st.subheader("📉 Aging Analysis - Past Due Invoices")
 
-        aging_df = df.copy()
-
-        aging_df = aging_df[
-            aging_df["Past Due Groups"].notna()
-        ].copy()
-
-        aging_df["Past Due Groups"] = (
-            aging_df["Past Due Groups"]
-            .astype(str)
-            .str.strip()
-        )
-
         order = [
             "1. <0",
             "2. 0-30",
@@ -2019,6 +2024,32 @@ if section_is_visible("aging"):
             "6. 121-360",
             "7. >360"
         ]
+
+        def classify_past_due_group(days):
+            if pd.isna(days):
+                return ""
+            if days < 0:
+                return "1. <0"
+            if days <= 30:
+                return "2. 0-30"
+            if days <= 60:
+                return "3. 31-60"
+            if days <= 90:
+                return "4. 61-90"
+            if days <= 120:
+                return "5. 91-120"
+            if days <= 360:
+                return "6. 121-360"
+            return "7. >360"
+
+        aging_df = df[df["Due Date"].notna()].copy()
+        aging_df["Days Past Due"] = (
+            today - aging_df["Due Date"]
+        ).dt.days
+        aging_df["Past Due Groups"] = aging_df[
+            "Days Past Due"
+        ].apply(classify_past_due_group)
+        aging_df = aging_df[aging_df["Past Due Groups"] != ""].copy()
 
         total_group = aging_df.groupby(
             "Past Due Groups",
@@ -2195,7 +2226,7 @@ if section_is_visible("aging"):
 
         st.plotly_chart(
             fig3,
-            use_container_width=True,
+            width="stretch",
             key="aging_past_due_chart"
         )
 
@@ -2223,21 +2254,79 @@ if section_is_visible("aging"):
         if len(risk_df) > 0:
 
             def classify_bucket(days):
-                if 31 <= days <= 60:
+                past_due_group = classify_past_due_group(days)
+
+                if past_due_group == "3. 31-60":
                     return "31-60"
-                elif 61 <= days <= 90:
+                if past_due_group == "4. 61-90":
                     return "61-90"
                 return ""
 
             risk_df["Bucket"] = risk_df["Days Past Due"].apply(classify_bucket)
+            risk_df = risk_df[risk_df["Bucket"] != ""].copy()
+
+            def risk_client_key(row):
+                return (
+                    clean_identity_value(row.get("HS ID", "")) or
+                    clean_identity_value(row.get("HS Name", "")) or
+                    clean_identity_value(row.get("Customer name", ""))
+                )
+
+            def first_clean_identity(series):
+                for item in series:
+                    value = clean_identity_value(item)
+
+                    if value:
+                        return value
+
+                return ""
+
+            def collect_comment_keys(group):
+                keys = []
+
+                for _, row in group.iterrows():
+                    for key in comment_alias_keys(
+                        row,
+                        primary_key=row.get("Risk Client Key", "")
+                    ):
+                        if key and key not in keys:
+                            keys.append(key)
+
+                return keys
+
+            risk_df["Risk Client Key"] = risk_df.apply(
+                risk_client_key,
+                axis=1
+            )
 
             pivot_risk = risk_df.pivot_table(
-                index=["Customer name", "HS ID", "HS Name"],
+                index="Risk Client Key",
                 columns="Bucket",
                 values="Amount Fixed (USD)",
                 aggfunc="sum",
                 fill_value=0
             ).reset_index()
+
+            risk_identity_df = risk_df.groupby(
+                "Risk Client Key",
+                as_index=False
+            ).agg(
+                **{
+                    "Customer name": ("Customer name", first_clean_identity),
+                    "HS ID": ("HS ID", first_clean_identity),
+                    "HS Name": ("HS Name", first_clean_identity)
+                }
+            )
+
+            risk_comment_keys = risk_df.groupby(
+                "Risk Client Key"
+            ).apply(collect_comment_keys).to_dict()
+
+            pivot_risk = pivot_risk.merge(
+                risk_identity_df,
+                on="Risk Client Key",
+                how="left"
+            )
 
             ordered_buckets = [
                 "31-60",
@@ -2249,7 +2338,12 @@ if section_is_visible("aging"):
                     pivot_risk[col] = 0
 
             pivot_risk = pivot_risk[
-                ["Customer name", "HS ID", "HS Name"] + ordered_buckets
+                [
+                    "Risk Client Key",
+                    "Customer name",
+                    "HS ID",
+                    "HS Name"
+                ] + ordered_buckets
             ]
 
             pivot_risk["Total Open"] = (
@@ -2269,18 +2363,17 @@ if section_is_visible("aging"):
             pivot_risk["Record Key"] = pivot_risk.apply(
                 lambda row: (
                     clean_identity_value(row["HS ID"])
+                    or clean_identity_value(row["HS Name"])
                     or clean_identity_value(row["Customer name"])
                 ),
                 axis=1
             )
 
             pivot_risk["Comment Keys"] = pivot_risk.apply(
-                lambda row: [
-                    clean_identity_value(row.get("Record Key", "")),
-                    clean_identity_value(row.get("HS ID", "")),
-                    clean_identity_value(row.get("Customer name", "")),
-                    clean_identity_value(row.get("HS Name", ""))
-                ],
+                lambda row: risk_comment_keys.get(
+                    clean_identity_value(row.get("Risk Client Key", "")),
+                    comment_alias_keys(row, primary_key=row.get("Record Key", ""))
+                ),
                 axis=1
             )
 
@@ -2462,7 +2555,7 @@ if section_is_visible("aging"):
                     "Save",
                     type="primary",
                     key=widget_key("save_risk_comment", record_key),
-                    use_container_width=True
+                    width="stretch"
                 ):
                     save_sheet_comment_aliases(
                         "Clients at Risk",
@@ -2482,12 +2575,14 @@ if section_is_visible("aging"):
                     st.rerun()
 
             risk_display_df = risk_editor_df.copy()
+            risk_table_height = 88 + (len(risk_display_df) * 46)
+            risk_table_height = min(max(risk_table_height, 170), 330)
 
             risk_selection = st.dataframe(
                 risk_display_df,
                 key="risk_clients_comment_picker",
-                use_container_width=True,
-                height=330,
+                width="stretch",
+                height=risk_table_height,
                 hide_index=True,
                 on_select="rerun",
                 selection_mode="single-row",
@@ -2532,7 +2627,7 @@ if section_is_visible("aging"):
                 }
             )
 
-            selected_risk_rows = risk_selection.selection.rows
+            selected_risk_rows = get_selected_dataframe_rows(risk_selection)
 
             if st.session_state.pop("skip_risk_dialog_once", False):
                 selected_risk_rows = []
@@ -2657,7 +2752,7 @@ if section_is_visible("aging"):
                 edited_bad = st.data_editor(
                     over90_display_df,
                     key="clients_over_90_editor_compact",
-                    use_container_width=True,
+                    width="stretch",
                     height=380,
                     num_rows="fixed",
                     hide_index=True,
@@ -2817,7 +2912,7 @@ if section_is_visible("aging"):
 
             st.plotly_chart(
                 fig,
-                use_container_width=True,
+                width="stretch",
                 key="collections_due_date_chart"
             )
 
@@ -3016,7 +3111,7 @@ if section_is_visible("aging"):
                     top10.rename(columns={
                         "Amount Fixed (USD)": "Amount USD"
                     }),
-                    use_container_width=True,
+                    width="stretch",
                     height=420,
                     hide_index=True
                 )
@@ -3574,7 +3669,7 @@ if section_is_visible("invoice-volume"):
 
         st.plotly_chart(
             fig4,
-            use_container_width=True,
+            width="stretch",
             key="invoice_volume_chart"
         )
 
@@ -3965,7 +4060,7 @@ if section_is_visible("invoice-volume"):
 
                 st.plotly_chart(
                     fig_churn,
-                    use_container_width=True,
+                    width="stretch",
                     key="monthly_billing_churn_chart"
                 )
 
@@ -4024,7 +4119,7 @@ if section_is_visible("invoice-volume"):
                     with st.form("churn_detail_comments_form"):
                         edited_churn_detail = st.data_editor(
                             selected_churn_detail_editor,
-                            use_container_width=True,
+                            width="stretch",
                             height=360,
                             hide_index=True,
                             key="churn_detail_editor",
@@ -4217,7 +4312,7 @@ if section_is_visible("invoice-volume"):
 
                     st.plotly_chart(
                         fig_credit_notes,
-                        use_container_width=True,
+                        width="stretch",
                         key="credit_notes_issued_bar_line_chart"
                     )
 
@@ -4297,7 +4392,7 @@ if section_is_visible("invoice-volume"):
                         with st.form("credit_notes_detail_comments_form"):
                             edited_credit_notes_detail = st.data_editor(
                                 credit_notes_editor,
-                                use_container_width=True,
+                                width="stretch",
                                 height=420,
                                 hide_index=True,
                                 key="credit_notes_detail_editor",
@@ -4504,7 +4599,7 @@ if section_is_visible("invoice-volume"):
 
                     st.plotly_chart(
                         fig_refunds,
-                        use_container_width=True,
+                        width="stretch",
                         key="refunds_issued_chart"
                     )
 
@@ -4584,7 +4679,7 @@ if section_is_visible("invoice-volume"):
                         with st.form("refunds_detail_comments_form"):
                             edited_refunds_detail = st.data_editor(
                                 refunds_editor,
-                                use_container_width=True,
+                                width="stretch",
                                 height=420,
                                 hide_index=True,
                                 key="refunds_detail_editor",
@@ -5575,7 +5670,7 @@ if section_is_visible("stripe-payments"):
 
                 st.plotly_chart(
                     fig_aging,
-                    use_container_width=True,
+                    width="stretch",
                     key="stripe_sheet_collections_by_aging_chart"
                 )
 
@@ -5614,7 +5709,7 @@ if section_is_visible("stripe-payments"):
 
                 st.dataframe(
                     style_basic_table(aging_summary),
-                    use_container_width=True,
+                    width="stretch",
                     height=285,
                     hide_index=True
                 )
@@ -5735,7 +5830,7 @@ if section_is_visible("stripe-payments"):
 
             st.plotly_chart(
                 fig_monthly,
-                use_container_width=True,
+                width="stretch",
                 key="stripe_sheet_monthly_collections_chart"
             )
 
@@ -5862,7 +5957,7 @@ if section_is_visible("stripe-payments"):
 
                 st.plotly_chart(
                     fig_variation,
-                    use_container_width=True,
+                    width="stretch",
                     key="stripe_sheet_monthly_collections_variation_chart"
                 )
 
@@ -6033,7 +6128,7 @@ if section_is_visible("stripe-payments"):
 
             st.plotly_chart(
                 fig_count_method,
-                use_container_width=True,
+                width="stretch",
                 key="stripe_sheet_payment_method_count_line_chart"
             )
 
@@ -6057,7 +6152,7 @@ if section_is_visible("stripe-payments"):
 
             st.dataframe(
                 style_basic_table(count_matrix),
-                use_container_width=True,
+                width="stretch",
                 height=220
             )
 
@@ -6145,7 +6240,7 @@ if section_is_visible("stripe-payments"):
 
             st.plotly_chart(
                 fig_amount_method,
-                use_container_width=True,
+                width="stretch",
                 key="stripe_sheet_payment_method_amount_line_chart"
             )
 
@@ -6169,7 +6264,7 @@ if section_is_visible("stripe-payments"):
 
             st.dataframe(
                 style_basic_table(amount_matrix),
-                use_container_width=True,
+                width="stretch",
                 height=220
             )
 
@@ -6277,7 +6372,7 @@ if section_is_visible("stripe-payments"):
 
             st.dataframe(
                 style_basic_table(brand_summary),
-                use_container_width=True,
+                width="stretch",
                 height=300,
                 hide_index=True
             )
@@ -6569,7 +6664,7 @@ if section_is_visible("stripe-payments"):
 
                 st.plotly_chart(
                     fig_success,
-                    use_container_width=True,
+                    width="stretch",
                     key="stripe_sheet_payment_success_rate_chart"
                 )
 
@@ -6593,7 +6688,7 @@ if section_is_visible("stripe-payments"):
 
                 st.dataframe(
                     style_basic_table(success_table),
-                    use_container_width=True,
+                    width="stretch",
                     height=260,
                     hide_index=True
                 )
@@ -6713,7 +6808,7 @@ if section_is_visible("stripe-payments"):
 
             st.dataframe(
                 style_basic_table(reason_df),
-                use_container_width=True,
+                width="stretch",
                 height=320,
                 hide_index=True
             )
@@ -6849,7 +6944,7 @@ if section_is_visible("stripe-payments"):
 
             st.plotly_chart(
                 fig_fee,
-                use_container_width=True,
+                width="stretch",
                 key="stripe_sheet_fee_monthly_chart"
             )
 
@@ -7460,7 +7555,7 @@ if section_is_visible("brazil-finance"):
 
                 st.plotly_chart(
                     fig_income,
-                    use_container_width=True,
+                    width="stretch",
                     key="bank_income_chart_v7"
                 )
 
@@ -7585,7 +7680,7 @@ if section_is_visible("brazil-finance"):
 
                     st.plotly_chart(
                         fig_income_variation,
-                        use_container_width=True,
+                        width="stretch",
                         key="bank_income_variation_chart_v7"
                     )
 
@@ -7691,7 +7786,7 @@ if section_is_visible("brazil-finance"):
 
                 st.plotly_chart(
                     fig_investment,
-                    use_container_width=True,
+                    width="stretch",
                     key="bank_investment_chart_v7"
                 )
 
@@ -7783,7 +7878,7 @@ if section_is_visible("brazil-finance"):
 
                 st.plotly_chart(
                     fig_costs,
-                    use_container_width=True,
+                    width="stretch",
                     key="bank_costs_evolution_chart_v7"
                 )
 
@@ -7915,7 +8010,7 @@ if section_is_visible("brazil-finance"):
 
                 st.plotly_chart(
                     fig_ratio,
-                    use_container_width=True,
+                    width="stretch",
                     key="bank_cost_ratio_chart_v7"
                 )
 
@@ -8020,7 +8115,7 @@ if section_is_visible("brazil-finance"):
 
                 st.dataframe(
                     detail_table,
-                    use_container_width=True,
+                    width="stretch",
                     height=340,
                     hide_index=True
                 )
@@ -8153,7 +8248,7 @@ if section_is_visible("brazil-finance"):
 
                 st.plotly_chart(
                     fig_taxes,
-                    use_container_width=True,
+                    width="stretch",
                     key="bank_taxes_chart_v7"
                 )
 
@@ -8431,7 +8526,7 @@ if section_is_visible("brazil-finance"):
 
                 st.dataframe(
                     styled_requests_table,
-                    use_container_width=True,
+                    width="stretch",
                     height=340,
                     hide_index=True
                 )
@@ -8696,7 +8791,7 @@ if section_is_visible("brazil-finance"):
 
                 st.plotly_chart(
                     fig_nfse,
-                    use_container_width=True,
+                    width="stretch",
                     key="nfse_status_chart_v7"
                 )
 
@@ -8758,7 +8853,7 @@ if section_is_visible("brazil-finance"):
 
             st.dataframe(
                 summary_nfse,
-                use_container_width=True,
+                width="stretch",
                 height=340,
                 hide_index=True
             )
