@@ -10,6 +10,7 @@ import re
 import sys
 import numpy as np
 import html
+import concurrent.futures
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -428,9 +429,23 @@ def get_dashboard_comments_worksheet():
 @st.cache_data(ttl=60, show_spinner=False)
 def load_dashboard_comments():
     try:
-        worksheet = get_dashboard_comments_worksheet()
-        records = worksheet.get_all_records()
+        timeout_seconds = float(
+            get_secret_or_env("DASHBOARD_COMMENTS_TIMEOUT_SECONDS", "4")
+        )
+
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(
+            lambda: get_dashboard_comments_worksheet().get_all_records()
+        )
+
+        try:
+            records = future.result(timeout=timeout_seconds)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
         comments_df = pd.DataFrame(records)
+    except concurrent.futures.TimeoutError:
+        return pd.DataFrame(columns=COMMENTS_COLUMNS)
     except Exception:
         return pd.DataFrame(columns=COMMENTS_COLUMNS)
 
