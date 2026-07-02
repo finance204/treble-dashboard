@@ -1824,9 +1824,12 @@ def notion_anchor(view_key):
         if view_key == active_view:
             _NOTION_VIEW_STATE["started"] = True
 
+    if not active_view:
+        return
+
     markdown_method = _ORIGINAL_STREAMLIT_METHODS.get("markdown", st.markdown)
 
-    if not active_view or view_key == active_view:
+    if view_key == active_view:
         markdown_method(
             f"<div id='{view_key}' style='height:1px;'></div>",
             unsafe_allow_html=True
@@ -1853,6 +1856,27 @@ if active_view:
         }}
         setTimeout(scrollToView, 500);
         setTimeout(scrollToView, 1200);
+        </script>
+        """,
+        height=0
+    )
+elif active_section != "all":
+    components.html(
+        """
+        <script>
+        function resetSectionScroll() {
+            const doc = window.parent.document;
+            doc.documentElement.scrollTop = 0;
+            doc.body.scrollTop = 0;
+            doc.querySelectorAll('[data-testid="stMain"], section, main, div').forEach((el) => {
+                if (el.scrollTop) {
+                    el.scrollTop = 0;
+                }
+            });
+        }
+        setTimeout(resetSectionScroll, 100);
+        setTimeout(resetSectionScroll, 700);
+        setTimeout(resetSectionScroll, 1500);
         </script>
         """,
         height=0
