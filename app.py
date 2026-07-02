@@ -96,6 +96,10 @@ def has_public_section_view():
     return get_query_param("section", "").strip().lower() in allowed_sections
 
 
+def is_public_dashboard_view():
+    return has_valid_embed_token() or has_public_section_view()
+
+
 def require_password_login():
     expected_password = get_secret_or_env("DASHBOARD_PASSWORD", "")
 
@@ -181,7 +185,7 @@ def require_dashboard_access():
     if not auth_enabled:
         return
 
-    if has_valid_embed_token() or has_public_section_view():
+    if is_public_dashboard_view():
         return
 
     auth_mode = get_secret_or_env(
@@ -428,6 +432,9 @@ def get_dashboard_comments_worksheet():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def load_dashboard_comments():
+    if is_public_dashboard_view():
+        return pd.DataFrame(columns=COMMENTS_COLUMNS)
+
     try:
         timeout_seconds = float(
             get_secret_or_env("DASHBOARD_COMMENTS_TIMEOUT_SECONDS", "4")
@@ -1886,6 +1893,10 @@ if active_section == "all":
     ])
 else:
     st.caption(f"Section view: {SECTION_LABELS[active_section]}")
+    st.markdown(
+        "<div style='height:1px'></div>",
+        unsafe_allow_html=True
+    )
 
 # ==================================================
 # TAB 1 - AGING ANALYSIS
