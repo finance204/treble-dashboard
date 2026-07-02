@@ -432,12 +432,9 @@ def get_dashboard_comments_worksheet():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def load_dashboard_comments():
-    if is_public_dashboard_view():
-        return pd.DataFrame(columns=COMMENTS_COLUMNS)
-
     try:
         timeout_seconds = float(
-            get_secret_or_env("DASHBOARD_COMMENTS_TIMEOUT_SECONDS", "4")
+            get_secret_or_env("DASHBOARD_COMMENTS_TIMEOUT_SECONDS", "8")
         )
 
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
