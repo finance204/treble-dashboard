@@ -1875,27 +1875,6 @@ if active_view:
         """,
         height=0
     )
-elif active_section != "all":
-    components.html(
-        """
-        <script>
-        function resetSectionScroll() {
-            const doc = window.parent.document;
-            doc.documentElement.scrollTop = 0;
-            doc.body.scrollTop = 0;
-            doc.querySelectorAll('[data-testid="stMain"], section, main, div').forEach((el) => {
-                if (el.scrollTop) {
-                    el.scrollTop = 0;
-                }
-            });
-        }
-        setTimeout(resetSectionScroll, 100);
-        setTimeout(resetSectionScroll, 700);
-        setTimeout(resetSectionScroll, 1500);
-        </script>
-        """,
-        height=0
-    )
 
 
 if active_section == "all":
