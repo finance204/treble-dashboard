@@ -434,7 +434,7 @@ def get_dashboard_comments_worksheet():
 def load_dashboard_comments():
     try:
         timeout_seconds = float(
-            get_secret_or_env("DASHBOARD_COMMENTS_TIMEOUT_SECONDS", "8")
+            get_secret_or_env("DASHBOARD_COMMENTS_TIMEOUT_SECONDS", "20")
         )
 
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -745,6 +745,12 @@ def latest_dashboard_comment_for_keys(comments_df, table_name, record_keys):
     if len(comments_df) == 0:
         return {"Comment": "", "Collection Status": ""}
 
+    table_names = (
+        [str(name) for name in table_name]
+        if isinstance(table_name, (list, tuple, set))
+        else [str(table_name)]
+    )
+
     cleaned_keys = [
         clean_identity_value(record_key)
         for record_key in record_keys
@@ -755,7 +761,7 @@ def latest_dashboard_comment_for_keys(comments_df, table_name, record_keys):
         return {"Comment": "", "Collection Status": ""}
 
     matches = comments_df[
-        (comments_df["Table"].astype(str) == str(table_name)) &
+        (comments_df["Table"].astype(str).isin(table_names)) &
         (comments_df["Record Key"].astype(str).isin(cleaned_keys))
     ].copy()
 
@@ -2413,19 +2419,24 @@ if section_is_visible("aging"):
 
             if len(risk_comments) > 0:
                 def resolve_latest_risk_comment(row):
-                    latest_comment = latest_dashboard_comment_for_keys(
+                    latest = latest_dashboard_comment_for_keys(
                         risk_comments,
-                        "Clients at Risk",
+                        ["Clients at Risk", "Clients Over 90"],
                         row.get("Comment Keys", [])
-                    ).get("Comment", "")
-
-                    return (
-                        latest_comment
-                        if clean_identity_value(latest_comment)
-                        else clean_identity_value(row.get("Comments", ""))
                     )
 
-                pivot_risk["Comments"] = pivot_risk.apply(
+                    latest_comment = latest.get("Comment", "")
+                    latest_status = latest.get("Collection Status", "")
+
+                    if latest_status and "Collection Status" in pivot_risk.columns:
+                        row["Collection Status"] = latest_status
+
+                    if latest_comment:
+                        row["Comments"] = latest_comment
+
+                    return row
+
+                pivot_risk = pivot_risk.apply(
                     resolve_latest_risk_comment,
                     axis=1
                 )
@@ -2756,7 +2767,7 @@ if section_is_visible("aging"):
             )
             bad_clients = add_latest_comments_by_alias(
                 bad_clients,
-                "Clients Over 90"
+                ["Clients Over 90", "Clients at Risk"]
             )
 
             for col in over_90_bucket_order + ["Total Open"]:
