@@ -4861,6 +4861,12 @@ if section_is_visible("stripe-payments"):
             line-height:1;
             white-space:nowrap;
         }
+        .stripe-fee-card .stripe-small {
+            font-size:11px;
+        }
+        .stripe-fee-card .stripe-big {
+            font-size:21px;
+        }
 
         div[data-testid="stDataFrame"] div {
             color:#334155 !important;
@@ -4913,9 +4919,9 @@ if section_is_visible("stripe-payments"):
         </style>
         """, unsafe_allow_html=True)
 
-        def metric_card(title, value, color_class):
+        def metric_card(title, value, color_class, extra_class=""):
             st.markdown(f"""
-            <div class="stripe-card {color_class}">
+            <div class="stripe-card {color_class} {extra_class}">
                 <div class="stripe-small">{title}</div>
                 <div class="stripe-big">{value}</div>
             </div>
@@ -5151,6 +5157,113 @@ if section_is_visible("stripe-payments"):
             return dataframe[
                 dataframe["month_label"] == selected_month
             ].copy()
+
+        def selected_fee_timestamp_range(selected_year, selected_month, dataframe=None):
+            if selected_month != "All":
+                try:
+                    month_start = pd.Period(selected_month, freq="M")
+                    start_dt = month_start.start_time.to_pydatetime().replace(
+                        tzinfo=timezone.utc
+                    )
+                    end_dt = (
+                        month_start + 1
+                    ).start_time.to_pydatetime().replace(tzinfo=timezone.utc)
+                    return int(start_dt.timestamp()), int(end_dt.timestamp())
+                except Exception:
+                    return None
+
+            if selected_year != "All":
+                start_dt = datetime(
+                    int(selected_year),
+                    1,
+                    1,
+                    tzinfo=timezone.utc
+                )
+                end_dt = datetime(
+                    int(selected_year) + 1,
+                    1,
+                    1,
+                    tzinfo=timezone.utc
+                )
+                return int(start_dt.timestamp()), int(end_dt.timestamp())
+
+            if dataframe is not None and len(dataframe) > 0:
+                try:
+                    min_period = dataframe["month_sort"].min()
+                    max_period = dataframe["month_sort"].max()
+                    start_dt = min_period.start_time.to_pydatetime().replace(
+                        tzinfo=timezone.utc
+                    )
+                    end_dt = (
+                        max_period + 1
+                    ).start_time.to_pydatetime().replace(tzinfo=timezone.utc)
+                    return int(start_dt.timestamp()), int(end_dt.timestamp())
+                except Exception:
+                    return None
+
+            return None
+
+        def standalone_fee_bucket(description):
+            text = str(description or "").lower()
+
+            if "inbound wire transfer" in text:
+                return "Inbound Wire Transfer"
+
+            if "invoicing plus" in text:
+                return "Invoicing Plus"
+
+            if "revenue recognition" in text:
+                return "Revenue Recognition"
+
+            return "Other"
+
+        @st.cache_data(ttl=300, show_spinner=False)
+        def load_standalone_stripe_fees(start_ts, end_ts):
+            api_key = get_secret_or_env("STRIPE_SECRET_KEY", "")
+
+            if not api_key:
+                return {
+                    "Inbound Wire Transfer": 0.0,
+                    "Invoicing Plus": 0.0,
+                    "Revenue Recognition": 0.0
+                }
+
+            stripe.api_key = api_key
+
+            totals = {
+                "Inbound Wire Transfer": 0.0,
+                "Invoicing Plus": 0.0,
+                "Revenue Recognition": 0.0
+            }
+
+            try:
+                transactions = stripe.BalanceTransaction.list(
+                    limit=100,
+                    type="stripe_fee",
+                    created={
+                        "gte": int(start_ts),
+                        "lt": int(end_ts)
+                    }
+                )
+
+                for transaction in transactions.auto_paging_iter():
+                    bucket = standalone_fee_bucket(
+                        transaction.get("description")
+                    )
+
+                    if bucket in totals:
+                        totals[bucket] += abs(
+                            float(transaction.get("amount", 0) or 0)
+                        ) / 100
+
+            except Exception:
+                return {
+                    "Inbound Wire Transfer": 0.0,
+                    "Invoicing Plus": 0.0,
+                    "Revenue Recognition": 0.0
+                }
+
+            return totals
 
         def add_point_labels(
             fig,
@@ -6897,33 +7010,87 @@ if section_is_visible("stripe-payments"):
                 selected_fee_month
             )
 
-            total_fee = selected_fee_df["stripe_fee"].sum()
+            normal_payment_fees = selected_fee_df["stripe_fee"].sum()
+            standalone_fee_totals = {
+                "Inbound Wire Transfer": 0.0,
+                "Invoicing Plus": 0.0,
+                "Revenue Recognition": 0.0
+            }
+            fee_range = selected_fee_timestamp_range(
+                selected_fee_year,
+                selected_fee_month,
+                selected_fee_df
+            )
+
+            if fee_range:
+                standalone_fee_totals = load_standalone_stripe_fees(
+                    fee_range[0],
+                    fee_range[1]
+                )
+
+            inbound_wire_fees = standalone_fee_totals.get(
+                "Inbound Wire Transfer",
+                0.0
+            )
+            invoicing_plus_fees = standalone_fee_totals.get(
+                "Invoicing Plus",
+                0.0
+            )
+            revenue_recognition_fees = standalone_fee_totals.get(
+                "Revenue Recognition",
+                0.0
+            )
+            total_fee = (
+                normal_payment_fees
+                + inbound_wire_fees
+                + invoicing_plus_fees
+                + revenue_recognition_fees
+            )
             total_fee_charges = selected_fee_df["charge_id"].nunique()
             avg_fee = (
-                total_fee / total_fee_charges
+                normal_payment_fees / total_fee_charges
             ) if total_fee_charges > 0 else 0
 
-            fee_card_col1, fee_card_col2, fee_card_col3 = st.columns(3)
+            fee_card_col1, fee_card_col2, fee_card_col3, fee_card_col4, fee_card_col5 = st.columns(5)
 
             with fee_card_col1:
                 metric_card(
                     "Total Stripe Fees",
                     format_money(total_fee),
-                    "stripe-card-red"
+                    "stripe-card-red",
+                    "stripe-fee-card"
                 )
 
             with fee_card_col2:
                 metric_card(
-                    "Charges With Fees",
-                    f"{total_fee_charges:,}",
-                    "stripe-card-blue"
+                    "Payment Fees",
+                    format_money(normal_payment_fees),
+                    "stripe-card-blue",
+                    "stripe-fee-card"
                 )
 
             with fee_card_col3:
                 metric_card(
-                    "Avg Fee Per Charge",
-                    f"${avg_fee:,.2f}",
-                    "stripe-card-green"
+                    "Inbound Wire Transfer",
+                    format_money(inbound_wire_fees),
+                    "stripe-card-amber",
+                    "stripe-fee-card"
+                )
+
+            with fee_card_col4:
+                metric_card(
+                    "Invoicing Plus",
+                    format_money(invoicing_plus_fees),
+                    "stripe-card-slate",
+                    "stripe-fee-card"
+                )
+
+            with fee_card_col5:
+                metric_card(
+                    "Revenue Recognition",
+                    format_money(revenue_recognition_fees),
+                    "stripe-card-green",
+                    "stripe-fee-card"
                 )
 
             st.markdown("<br>", unsafe_allow_html=True)
