@@ -5675,6 +5675,7 @@ if section_is_visible("stripe-payments"):
 
             standalone_df["year"] = standalone_df["created"].dt.year.astype("Int64")
             standalone_df["month_label"] = standalone_df["created"].dt.strftime("%Y-%b")
+            standalone_df["month_sort"] = standalone_df["created"].dt.to_period("M")
 
             return standalone_df
 
@@ -7156,14 +7157,54 @@ if section_is_visible("stripe-payments"):
 
             st.markdown("<br>", unsafe_allow_html=True)
 
-            fee_chart_df = fee_year_df.groupby(
+            payment_fee_chart_df = fee_year_df.groupby(
                 ["month_sort", "month_label"],
                 as_index=False
             ).agg(
-                Stripe_Fees=("stripe_fee", "sum"),
+                Payment_Fees=("stripe_fee", "sum"),
                 Charges=("charge_id", "nunique")
             )
 
+            standalone_fee_chart_source_df = standalone_fee_df.copy()
+
+            if len(standalone_fee_chart_source_df) > 0 and selected_fee_year != "All":
+                standalone_fee_chart_source_df = standalone_fee_chart_source_df[
+                    standalone_fee_chart_source_df["year"] == selected_fee_year
+                ]
+
+            if len(standalone_fee_chart_source_df) > 0:
+                standalone_fee_chart_df = standalone_fee_chart_source_df.groupby(
+                    ["month_sort", "month_label"],
+                    as_index=False
+                ).agg(
+                    Standalone_Fees=("amount", "sum")
+                )
+            else:
+                standalone_fee_chart_df = pd.DataFrame(
+                    columns=["month_sort", "month_label", "Standalone_Fees"]
+                )
+
+            fee_chart_df = payment_fee_chart_df.merge(
+                standalone_fee_chart_df,
+                on=["month_sort", "month_label"],
+                how="outer"
+            )
+            fee_chart_df["Payment_Fees"] = pd.to_numeric(
+                fee_chart_df["Payment_Fees"],
+                errors="coerce"
+            ).fillna(0)
+            fee_chart_df["Standalone_Fees"] = pd.to_numeric(
+                fee_chart_df["Standalone_Fees"],
+                errors="coerce"
+            ).fillna(0)
+            fee_chart_df["Charges"] = pd.to_numeric(
+                fee_chart_df["Charges"],
+                errors="coerce"
+            ).fillna(0)
+            fee_chart_df["Stripe_Fees"] = (
+                fee_chart_df["Payment_Fees"]
+                + fee_chart_df["Standalone_Fees"]
+            )
             fee_chart_df = fee_chart_df.sort_values("month_sort")
 
             fig_fee = go.Figure()
