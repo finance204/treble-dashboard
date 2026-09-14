@@ -5637,6 +5637,47 @@ if section_is_visible("stripe-payments"):
 
             return stripe_df
 
+        @st.cache_data(ttl=300, show_spinner=False)
+        def load_standalone_stripe_fees_from_sheet():
+            try:
+                standalone_df = load_google_sheet_by_name(
+                    stripe_sheet_id,
+                    "stripe_standalone_fees"
+                )
+            except Exception:
+                return pd.DataFrame()
+
+            standalone_df.columns = standalone_df.columns.str.strip()
+
+            for col in ["created", "amount", "description", "fee_category"]:
+                if col not in standalone_df.columns:
+                    standalone_df[col] = ""
+
+            standalone_df["created"] = pd.to_datetime(
+                standalone_df["created"],
+                errors="coerce"
+            )
+            standalone_df["amount"] = pd.to_numeric(
+                standalone_df["amount"],
+                errors="coerce"
+            ).fillna(0).abs()
+            standalone_df["fee_category"] = np.where(
+                standalone_df["fee_category"].astype(str).str.strip().isin(
+                    ["", "nan", "None"]
+                ),
+                standalone_df["description"].apply(standalone_fee_bucket),
+                standalone_df["fee_category"].astype(str).str.strip()
+            )
+
+            standalone_df = standalone_df[
+                standalone_df["created"].notna()
+            ].copy()
+
+            standalone_df["year"] = standalone_df["created"].dt.year.astype("Int64")
+            standalone_df["month_label"] = standalone_df["created"].dt.strftime("%Y-%b")
+
+            return standalone_df
+
         try:
             stripe_df = load_stripe_data_from_sheet()
         except Exception as e:
@@ -7016,13 +7057,33 @@ if section_is_visible("stripe-payments"):
                 "Invoicing Plus": 0.0,
                 "Revenue Recognition": 0.0
             }
+            standalone_fee_df = load_standalone_stripe_fees_from_sheet()
+
+            if len(standalone_fee_df) > 0:
+                selected_standalone_fee_df = standalone_fee_df.copy()
+
+                if selected_fee_year != "All":
+                    selected_standalone_fee_df = selected_standalone_fee_df[
+                        selected_standalone_fee_df["year"] == selected_fee_year
+                    ]
+
+                if selected_fee_month != "All":
+                    selected_standalone_fee_df = selected_standalone_fee_df[
+                        selected_standalone_fee_df["month_label"] == selected_fee_month
+                    ]
+
+                for category in standalone_fee_totals:
+                    standalone_fee_totals[category] = selected_standalone_fee_df[
+                        selected_standalone_fee_df["fee_category"] == category
+                    ]["amount"].sum()
+
             fee_range = selected_fee_timestamp_range(
                 selected_fee_year,
                 selected_fee_month,
                 selected_fee_df
             )
 
-            if fee_range:
+            if fee_range and not any(standalone_fee_totals.values()):
                 standalone_fee_totals = load_standalone_stripe_fees(
                     fee_range[0],
                     fee_range[1]
