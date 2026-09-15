@@ -5247,13 +5247,14 @@ if section_is_visible("stripe-payments"):
                 )
 
                 for transaction in transactions.auto_paging_iter():
+                    transaction_data = transaction._to_dict_recursive()
                     bucket = standalone_fee_bucket(
-                        transaction.get("description")
+                        transaction_data.get("description")
                     )
 
                     if bucket in totals:
                         totals[bucket] += abs(
-                            float(transaction.get("amount", 0) or 0)
+                            float(transaction_data.get("amount", 0) or 0)
                         ) / 100
 
             except Exception:
