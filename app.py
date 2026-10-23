@@ -2983,11 +2983,11 @@ if section_is_visible("aging"):
 
             monthly_collection_table.loc["🔴 Open %"] = percent.loc[
                 "open"
-            ].map(lambda x: f"{x:.0f}%")
+            ].map(lambda x: f"{x:.2f}%")
 
             monthly_collection_table.loc["🟢 Paid %"] = percent.loc[
                 "paid"
-            ].map(lambda x: f"{x:.0f}%")
+            ].map(lambda x: f"{x:.2f}%")
 
             monthly_collection_table.loc["🔴 Open Amount"] = pivot.loc[
                 "open"
